@@ -1,0 +1,79 @@
+{
+  "features": [
+    "h",
+    "lag168",
+    "rec24",
+    "rec168",
+    "temp_c",
+    "humidity",
+    "solar_rad",
+    "wind_spd",
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south",
+    "cap_btmppa_mw",
+    "solar_deficit",
+    "solar_ramp",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "month_sin",
+    "month_cos",
+    "day_type"
+  ],
+  "categorical": [
+    "day_type"
+  ],
+  "target": "real_demand_jeju",
+  "best_iteration": 569,
+  "horizon": "1..120 direct (D+1~D+5)",
+  "origin_hour": 23,
+  "weather": [
+    "temp_c",
+    "humidity",
+    "solar_rad",
+    "wind_spd",
+    "jeju 3-station spatial mean (solar 2-station)"
+  ],
+  "cloud": [
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south"
+  ],
+  "cloud_horizon_mask": "h<=48 only (D+1/D+2), else NaN",
+  "cloudy_features": [
+    "solar_deficit (1-solar/clim_solar)",
+    "solar_ramp (|d solar|)",
+    "h<=48 only"
+  ],
+  "cap_feature": "cap_btmppa_mw (monthly BTM+PPA solar capacity MW, 전력거래소; data/jeju_ppa_btm_capacity_mw.csv)",
+  "objective": "quantile",
+  "alpha": 0.6,
+  "daytime_weight": 2.0,
+  "daytime_hours": "08-16",
+  "serving_weather": "raw forecast (QM 미적용 — QM은 흐린날 순효과 음, 2-0c 검증)",
+  "train": "target<=2026-01-31 23:00",
+  "val": "2026-02-01..2026-05-31 23:00",
+  "test": "2026-06-01..2026-07-31 23:00",
+  "deploy_refit": "train+val+test 전체 재적합 (num_boost_round=569 고정). 성능표는 검증본 기준.",
+  "cap_future_month": "캐리포워드(최신월 값 유지) — serve_demand._cap_for 와 동일",
+  "retrained": "2026-07-30 (지평 168h->120h, 학습창 최신화, CSV/레거시 forecast -> 메인 DB 배선)",
+  "params": {
+    "objective": "quantile",
+    "alpha": 0.6,
+    "metric": "quantile",
+    "learning_rate": 0.024,
+    "num_leaves": 244,
+    "min_data_in_leaf": 76,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "lambda_l2": 0.1,
+    "verbosity": -1,
+    "random_state": 42
+  },
+  "note": "LGBM-only direct multi-horizon. h kept, lag24 dropped. +cloud(west/south raw,h<=48)+BTM/PPA capacity+흐린날피처(solar_deficit/ramp). 비대칭 quantile(0.60)+낮가중2로 흐린날 surge 과소예측 공략(2-0c, 사용자 Decision Gate). 예측은 ~0.60분위(의도적 상향=과소예측 회피). 기존 PatchTST+LGBM D+1 파이프라인은 별도 유지. 2026-07-30 재학습: 지평 D+1~D+5(120h)로 축소 — 예보 수집이 --days 5 라 D+6/7 은 서빙 입력이 기후값 폴백뿐이었고 운영 지평도 5일이다."
+}

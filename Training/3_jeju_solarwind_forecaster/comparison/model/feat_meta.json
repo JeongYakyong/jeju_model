@@ -1,0 +1,47 @@
+{
+  "SOLAR_FINAL": [
+    "solar_rad_west",
+    "solar_rad_south",
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south",
+    "solar_damping_south",
+    "clearsky_ratio_south",
+    "hour_sin",
+    "hour_cos",
+    "month_sin",
+    "month_cos"
+  ],
+  "SOLAR_ABLATION": [
+    "solar_rad_west",
+    "solar_rad_south",
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south",
+    "solar_damping_west",
+    "solar_damping_south",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "WIND_FINAL": [
+    "wind_spd_west",
+    "wind_spd_east",
+    "wind_zone_east",
+    "wd_sin_west",
+    "wd_cos_west",
+    "hour_sin",
+    "hour_cos",
+    "year_sin",
+    "year_cos"
+  ],
+  "target_solar": "real_solar_utilization_jeju",
+  "target_wind": "real_wind_utilization_jeju",
+  "train": "<=2026-01-31 23:00",
+  "val": "2026-02-01..2026-05-31 23:00",
+  "test": "2026-06-01..2026-07-31 23:00",
+  "deploy_refit": "train+val+test 전체 재적합 (n_estimators=best_iteration 고정)",
+  "source": "main DB historical (2026-07-30 재학습; 구 solarwind_raw_jeju.csv 대체)",
+  "clearsky_clim": "train 구간 (month,hour) rad 90분위 — 서빙이 같은 학습창으로 재현해야 함"
+}

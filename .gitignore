@@ -1,0 +1,42 @@
+# 파이썬
+__pycache__/
+*.pyc
+
+# 비밀·인증
+.env
+.streamlit/secrets.toml
+.auth_token
+
+# ─────────────────────────────────────────────────────────────────────
+# git 이 추적하는 것 = 서버가 `git pull` 한 번으로 받는 것
+#   models/       배포 가중치·메타·보정표. 가중치와 메타는 **한 세트**라
+#                 통째로 추적한다 — 따로 옮기다 버전이 어긋나면 조용히 틀린다
+#                 (스케일러 1개가 바뀌면 D+1~D+5 가중치 전부가 같이 바뀐다).
+#   data/refdata/ 외부 입력(BTM·PPA 용량, 지도 경계, 신재생 원자료).
+#                 재생성이 안 되거나 외부에서 받아야 하는 것들이라 추적한다.
+# → 이 둘은 아래 어디에도 넣지 말 것. CLAUDE.md 의 "모델(~80MB)은 .gitignore
+#   대상" 이라는 옛 기술은 2026-07-31 에 이 방침으로 정정됐다.
+# ─────────────────────────────────────────────────────────────────────
+
+# 운영 DB — 크고 매일 바뀐다. 서버가 자체 수집하므로 배포 대상이 아니다.
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# 학습 중간 산출물 — 배포에 안 쓰이고 재학습으로 재생성된다 (약 233MB).
+# 학습 "코드"(.py/.ipynb/.md)는 추적한다 — 재학습 절차가 저장소에 남아야 하므로.
+Training/**/*.pth
+Training/**/*.pkl
+Training/**/*.txt
+Training/**/*.parquet
+Training/**/*.csv
+Training/retrained_weight/
+Training/**/no use/
+Training/**/fig/
+Training/**/tab/
+
+# 편집기·OS 잡동사니
+.ipynb_checkpoints/
+Thumbs.db
+None

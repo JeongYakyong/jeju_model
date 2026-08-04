@@ -1,0 +1,17 @@
+# jeju_model — 수집(collectors) + 서빙(forecasting) + 화면(streamlit) 통합 의존성
+# (원본 forecastmodel 각 단계 requirements 통합 + google-genai 보완)
+streamlit>=1.58
+pandas>=2.0
+numpy>=1.24
+plotly>=5.15
+torch>=2.0
+lightgbm>=4.0
+scikit-learn>=1.3
+joblib
+pvlib>=0.10
+holidays>=0.45
+requests>=2.31
+urllib3
+python-dotenv>=0.21   # 현 개발환경 0.21 에서 검증 (find_dotenv 상위 탐색 포함)
+google-genai>=1.0
+pyarrow          # horizon_backtest parquet 산출용

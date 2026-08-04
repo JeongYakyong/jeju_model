@@ -1,0 +1,7 @@
+{
+  "solar_beta": -0.07405,
+  "wind_beta": 0.06223,
+  "solar_tcog": "south",
+  "wind_tcog": "east",
+  "note": "corrected_util = clip(pred + beta*tcog_station, 0, 1). solar uses tcog_south (daytime), wind uses tcog_east. Only tcog>0 corrected. Stations chosen by residual-fit (3cmp-3): south best for solar(+10.1%), east best for wind(+10.7%); west redundant (already main model feature). Fit on full forecast period."
+}

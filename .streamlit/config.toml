@@ -1,0 +1,53 @@
+# Gascast 대시보드 테마 — 브리핑 콘솔(라이트 캔버스 + 다크 잉크 사이드바, green #059669)
+# 기상개황 지도(weather_map.py)의 디자인 토큰과 동일 계열: ink #0f172a / line #e2e8f0 / green #059669
+# ※ "08_streamlit/.streamlit/config.toml" 과 동일 내용 — 실행 위치가 달라도 적용되게 복제.
+
+[theme]
+base = "light"
+primaryColor = "#059669"
+backgroundColor = "#f4f6f9"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0f172a"
+linkColor = "#047857"
+borderColor = "#94a3b8"
+baseRadius = "0.6rem"
+font = "Pretendard, 'Segoe UI', sans-serif"
+headingFont = "Pretendard, 'Segoe UI', sans-serif"
+codeFont = "'IBM Plex Mono', monospace"
+
+[theme.sidebar]
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#e2e8f0"
+primaryColor = "#34d399"
+borderColor = "#1e293b"
+
+[[theme.fontFaces]]
+family = "Pretendard"
+url = "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/woff2/Pretendard-Regular.woff2"
+weight = 400
+
+[[theme.fontFaces]]
+family = "Pretendard"
+url = "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/woff2/Pretendard-SemiBold.woff2"
+weight = 600
+
+[[theme.fontFaces]]
+family = "Pretendard"
+url = "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/woff2/Pretendard-Bold.woff2"
+weight = 700
+
+[[theme.fontFaces]]
+family = "Pretendard"
+url = "https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/woff2/Pretendard-ExtraBold.woff2"
+weight = 800
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.1.0/files/ibm-plex-mono-latin-500-normal.woff2"
+weight = 500
+
+[[theme.fontFaces]]
+family = "IBM Plex Mono"
+url = "https://cdn.jsdelivr.net/npm/@fontsource/ibm-plex-mono@5.1.0/files/ibm-plex-mono-latin-600-normal.woff2"
+weight = 600

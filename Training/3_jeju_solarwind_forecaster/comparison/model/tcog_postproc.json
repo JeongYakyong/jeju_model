@@ -1,0 +1,5 @@
+{
+  "solar_beta": -0.04113,
+  "wind_beta": 0.05904,
+  "note": "corrected_util = clip(pred + beta*tcog_stationmean, 0,1); solar=mean(west,south) tcog 낮시간, wind=mean(west,east) tcog 전시간"
+}

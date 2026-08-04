@@ -1,0 +1,44 @@
+{
+  "SOLAR_FINAL": [
+    "solar_rad_west",
+    "solar_rad_south",
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south",
+    "solar_damping_west",
+    "solar_damping_south",
+    "clearsky_ratio_west",
+    "clearsky_ratio_south",
+    "hour_sin",
+    "hour_cos",
+    "month_sin",
+    "month_cos"
+  ],
+  "SOLAR_ABLATION": [
+    "solar_rad_west",
+    "solar_rad_south",
+    "total_cloud_west",
+    "total_cloud_south",
+    "midlow_cloud_west",
+    "midlow_cloud_south",
+    "solar_damping_west",
+    "solar_damping_south",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "WIND_FINAL": [
+    "wind_spd_west",
+    "wind_spd_east",
+    "wind_zone_west",
+    "wind_zone_east",
+    "wd_sin_west",
+    "wd_cos_west",
+    "hour_sin",
+    "hour_cos",
+    "year_sin",
+    "year_cos"
+  ],
+  "target_solar": "real_solar_utilization_jeju",
+  "target_wind": "real_wind_utilization_jeju"
+}

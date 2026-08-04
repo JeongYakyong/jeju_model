@@ -1,0 +1,60 @@
+{
+  "feature_cols": [
+    "patchtst_target",
+    "lag_24h",
+    "roll_mean_24h",
+    "temp_c",
+    "humidity",
+    "solar_rad",
+    "wind_spd",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "day_type"
+  ],
+  "categorical_cols": [
+    "day_type"
+  ],
+  "categorical_categories": {
+    "day_type": [
+      "holiday",
+      "weekday",
+      "weekend"
+    ]
+  },
+  "target": "real_demand",
+  "best_iteration": 1320,
+  "val_best_mae": 21.601848945739526,
+  "lgbm_version": "4.6.0",
+  "trained_at": "2026-06-01T18:23:50",
+  "train_range": [
+    "2020-01-01",
+    "2025-02-28"
+  ],
+  "val_range": [
+    "2025-03-01",
+    "2026-03-21"
+  ],
+  "signal_source": "patchtst",
+  "data_source": "input_data_jeju.db/historical (3-station weather)",
+  "weather_cols": [
+    "temp_c",
+    "humidity",
+    "solar_rad",
+    "wind_spd"
+  ],
+  "params": {
+    "objective": "regression_l1",
+    "metric": "mae",
+    "learning_rate": 0.024,
+    "num_leaves": 244,
+    "min_data_in_leaf": 76,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "lambda_l2": 0.1,
+    "verbosity": -1,
+    "random_state": 42
+  }
+}
