@@ -61,7 +61,10 @@ selftest_pivot 17항목 통과 / AppTest exception 0 / 본 DB 무변경(32,012�
   밖이다. 2026-12 에 `tcog>0` 이 다시 나오면 확인할 것.
 - PatchTST 가중치는 D+1~D+5 가 **한 세트**(스케일러 공유). `models/` 가 git 에 들어가므로
   재학습마다 수십 MB 누적 — 잦아지면 Git LFS 로.
-- `patchtst_signal` 이 2026-05-31 에서 끊겨 demand D+1 비교 지표가 NaN.
+- `patchtst_signal` 은 2026-05-31 에서 축적이 멈춰 있다. **학습 전용**이라 서빙·화면엔
+  영향이 없다 — `collectors/`·`forecasting/`·`pages/` 어디서도 안 읽고,
+  `Training/2_.../model/_build_2a.py` 의 demand 비교에서만 D+1 PatchTST 열이 NaN 이 된다.
+  (CSV 에서 이전된 정적 신호 테이블이라 늘리려면 PatchTST 를 새 구간에 돌려야 한다.)
 - 백업: 스크래치 `backup_grib_20260804/`(삭제한 GRIB 파일들), `solar_scale_BEFORE_20260804.json`.
 - **2026-08-04 정리분** (전부 복구 불필요): `input_data_jeju(temp).db` 57MB(본 DB 부분집합임을
   표본 합계로 확인), `__pycache__` 18개·`.pyc`, `data/nctest_jeju.db`(검증 산출물),

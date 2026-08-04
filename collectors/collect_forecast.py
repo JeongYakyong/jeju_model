@@ -521,29 +521,39 @@ def verify_runs(db_path: Path, region: str, out: str | None,
     if not db_path.exists() or db_path.stat().st_size == 0:
         print(f"[verify:{region}] {db_path.name} 없음")
         return []
+    # 기대 행수는 **수집 창에서 계산**한다 (구 하드코딩 144 는 D+7 시절 값이라,
+    # D+5 로 정상 수집된 base 를 전부 불완전으로 오판했다 -- 2026-08-04 수정).
+    days = days if days is not None else REGIONS[region]["days"]
     with sqlite3.connect(db_path) as c:
         try:
             cols = [r[1] for r in c.execute(f"PRAGMA table_info({RUNS_TABLE})")]
         except sqlite3.OperationalError:
             print(f"[verify:{region}] {RUNS_TABLE} 테이블 없음")
             return []
-        # temp_skin_* 은 KIMR 전용이라 제주 D+5 21시 이후 NULL 이 정상 -- 제외.
+        # sentinel = 모든 지점·모든 hf 가 항상 가져야 하는 컬럼.
+        # · temp_*      : KIMR/KIMG 둘 다 내므로 NULL = 그 (지점,시각) fetch 실패
+        #   (temp_skin_* 은 KIMR 전용이라 D+5 꼬리 NULL 이 정상 -- 제외)
+        # · total_cloud_*: **2026-08-04 추가.** 2026-07-02~11 에 KIMG 운량만 3h 로 떨어진
+        #   사고가 있었는데 temp 는 멀쩡해서 10 base 동안 못 잡았다. 운량은 전 지평
+        #   KIMG 단독 공급이라 D+1~5 에서 NULL 이면 실패가 맞다.
         sentinels = [
             col for col in cols
-            if col.startswith("temp") and not col.startswith("temp_skin")
+            if (col.startswith("temp") and not col.startswith("temp_skin"))
+            or col.startswith("total_cloud")
         ]
         if not sentinels:
             print(f"[verify:{region}] temp* sentinel 컬럼 없음 -- 검사 불가")
             return []
         agg = ", ".join(f'COUNT("{col}") AS "{col}"' for col in sentinels)
+        # ★운영 지평(D+1~days)만 본다.  기대 행수를 그 창에서 계산하므로 NULL 검사도
+        #   같은 범위여야 일관된다 -- D+7 시절에 쌓인 잔재 행(3h 간격, KIMG-only)까지
+        #   세면 정상 base 가 영원히 불완전으로 남는다 (2026-08-04).
         rows = c.execute(
             f"SELECT base, COUNT(*) AS n_rows, {agg} FROM {RUNS_TABLE} "
-            f"GROUP BY base ORDER BY base"
+            f"WHERE horizon_d <= ? GROUP BY base ORDER BY base",
+            (days,),
         ).fetchall()
 
-    # 기대 행수는 **수집 창에서 계산**한다 (구 하드코딩 144 는 D+7 시절 값이라,
-    # D+5 로 정상 수집된 base 를 전부 불완전으로 오판했다 -- 2026-08-04 수정).
-    days = days if days is not None else REGIONS[region]["days"]
     expected_rows = len(expected_timestamps(latest_base(12), days))
     bad: list[str] = []
     print(f"[verify:{region}] {db_path.name}::{RUNS_TABLE} -- "
