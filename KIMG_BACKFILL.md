@@ -1,8 +1,12 @@
 # KIMG met 백필 — **완료** (실행 2026-08-12)
 
 > 이 문서는 백필 **실행 안내**로 쓰였고, 지금은 **결과와 후속 판단**을 담는다.
-> 실행 결과: `forecast_kimg` **33,660행 / 237 base** (met 185 base / 확장변수 173 base).
-> 남은 것: 2026-07 의 12 base 가 구 13변수 세트다 (`--force` 로 채우면 완결).
+> 실행 결과: `forecast_kimg` **33,516행 / 237 base** (met **185 base** / 확장변수 **178 base**).
+> 남은 것: **2026-07-07~07-12 의 6 base** 만 구 13변수 세트다.
+> met·일사·운량은 185 base 전부 정상이라 **서빙·소스비교에는 영향 없다** — 신규 탐색
+> 변수 9종만 그 6일치가 비어 있다.  채우려면:
+> `python collectors/collect_archive.py --kimg-only --base 20260707 --force --point-workers 2`
+> (07-07 ~ 07-12 각각, 또는 `--backfill 40 --force` 로 한 번에 — 후자는 40 base 재수집이라 2시간)
 
 `forecast_kimg` 의 met 이 **12 base 뿐이라** KIMR↔KIMG 소스 비교가 불가능했다
 ("KIMG met 은 설계상 안 쓴다"로 수집을 안 했고, 나머지 224 base 는 `forecast_horizon` 의
