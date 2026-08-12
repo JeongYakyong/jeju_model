@@ -47,7 +47,7 @@ python collectors/collect_archive.py --utc 18 --days 3          # --backfill N /
 검증 (테스트 스위트는 `selftest_pivot.py` 하나뿐이다):
 
 ```bash
-python collectors/selftest_pivot.py     # long→wide 피벗 불변조건 (네트워크 0회) — 피벗 손대면 필수
+python collectors/selftest_pivot.py     # long→wide 피벗 불변조건 21항목 (네트워크 0회) — 피벗 손대면 필수
 python -m compileall -q .
 python forecasting/serve_chain.py --utc 12 --no-write   # 서빙 무손상: 120행 hd 1~5 형상 확인
 python collectors/collect_forecast.py --verify          # base 완전성 (fetch 없음)
@@ -167,8 +167,8 @@ collectors/ 는 **9개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙
 | `kma_kimr_nc.py` | KIMR(R030) std-NC / 등압면 CLDFRA — **KIMR 유일 경로** |
 | `kpx_asos.py` | KPX 수급·DA·RT SMP + KMA ASOS 관측 (실측 소스) |
 | `pivot.py` | long → wide 피벗 1벌 (`_pivot_point`+`_derive_point`+스펙표 2개) |
-| `postprocess.py` | clip_ranges / add_day_type (forecasting/ 도 import) |
-| `selftest_pivot.py` | `pivot.py` 불변조건 검사 (네트워크 0회, 17항목) |
+| `postprocess.py` | clip_ranges / fill_short_gaps / drop_sentinels / sanity_check / add_day_type (forecasting/ 도 import) |
+| `selftest_pivot.py` | `pivot.py` 불변조건 검사 (네트워크 0회, 21항목) |
 
 (2026-07-21: 구 `collect_data_jeju` + `_new` + `collect_forecast_new` + `collect_forecast_runs`
 4겹 래퍼 체인을 `collect_historical` / `collect_forecast` 둘로 정리.)
@@ -247,6 +247,42 @@ import 되면 서빙 부품이다 — 학습 전용으로 오인해 옮기거나
 - **병목은 모델이 아니라 예보다** — 같은 모델에 입력만 바꿔 재면 실측 MAE 0.0625 / 예보 D+1
   0.1068(+71%) / D+5 0.1640(+162%). **D+3 부터 예보 오차 > 모델 오차**라, 재학습보다 예보 품질
   (NC 전환)이 지렛대가 크다.
+- ### ★수집 사다리 — 순서가 곧 안전장치다 (2026-08-12)
+
+  `collect_forecast` 는 결손을 이 순서로 메운다.  **순서를 바꾸면 나빠진다.**
+
+  | 단계 | 무엇 | 어디 |
+  |---|---|---|
+  | ① | KIMG 정상값 | `build_wide` |
+  | ② | 짧은 결손(연속 2개=3h 사고) → **시간 보간** | `postprocess.fill_short_gaps` |
+  | ③ | 그래도 빈 일사·운량 → **KIMR(NC) 대체** | `collect_forecast._substitute_solar_cloud` |
+  | ④ | sentinel(9999) → NaN, 범위 clip, 건전성 검사 | `postprocess.drop_sentinels/clip_ranges/sanity_check` |
+
+  - **②가 ③보다 먼저인 이유**: 2026-07-02~11 사고를 정답(재수집본)과 대조한 실측,
+    결손 780칸 — 시간 보간 MAE 0.063~0.106(r 0.81~0.90) vs KIMR 대체 0.346~0.490
+    (r 0.25~0.43, 큰오차 43~59%).  두 모델이 **다른 구름을 본다**(전운량 r 0.47).
+  - **③을 그래도 두는 이유**: KIMG 가 통째로 안 오면 보간할 이웃이 없다.
+    "예측 없음"보다 "오차 있는 예측 + 출처 통보"가 낫다(사용자 결정 2026-08-12).
+    실패 시뮬레이션 실측: 1,062셀 전부 복구, 일사 r 0.94 / 운량 r 0.40.
+    출처는 **`src_solar_cloud`** 컬럼('KIMG'/'KIMR')에 남는다.
+  - ⚠`fill_short_gaps` 는 반드시 `clip_ranges` **앞**이다 — clip 이 radiation/rainfall
+    의 NaN 을 0 으로 채워 버리면 메울 결손이 사라진다.
+  - ⚠`_substitute_solar_cloud` 는 `forecast_days_override` **밖**에서 불리므로
+    `days` 를 인자로 받는다.  `ckg.FORECAST_DAYS` 를 직접 읽으면 기본값 2 로 돌아가
+    창이 48시각으로 잘린다(2026-08-12 실패 테스트에서 잡은 버그).
+
+- ### ★9999 는 이상치가 아니라 **결측**이다
+  `cape`/`cinn` 의 9999 = "대류불안정 없음"(Training EDA 3cmp-2).  숫자로 두면 통계가
+  통째로 망가진다 — 구 GRIB base 실측 **cape 평균 2073.0 → NaN 처리 후 256.6**(8배 왜곡).
+  `postprocess.drop_sentinels` 가 `clip_ranges` 앞에서 NaN 으로 정정한다.
+  NC 는 9999 를 안 내므로 신규 수집분엔 무영향이고, API 가 다시 내면 여기서 막힌다.
+
+- **`postprocess.sanity_check`** — 범위 **안**의 이상을 잡는다(clip 은 범위 밖만).
+  결측률·얼어붙음·1h 급변·물리 모순(이슬점>기온, 돌풍<풍속, 층별운량>전운량).
+  **값을 고치지 않고 경고만** 낸다 — 무엇이 이상인지는 사람이 판단해야 하고 잘못
+  고치면 더 나쁘다.  `run_region` 이 적재 직전 돌려 `main()` 이 rc=1 로 올린다.
+  `--verify` 도 불완전 base 가 있으면 rc=1.
+
 - **수집 순서 ② → ②-2 는 안전장치다.** ② 예보 수집이 `INSERT OR REPLACE` 라 나중에 돌면
   ②-2 가 채운 컬럼이 NULL 로 덮인다. 예보를 수동 재실행했으면 ②-2 도 재실행할 것.
 - ### ★★ KIMR GRIB 은 **삭제됐다** (2026-08-04) — 옛 이름으로 찾지 말 것 ★★
@@ -305,10 +341,27 @@ import 되면 서빙 부품이다 — 학습 전용으로 오인해 옮기거나
   - 90일 이전 TSKIN 은 메울 방법이 없다(GRIB 삭제) — 다만 **서빙이 안 쓰는 변수**라 무해하다.
 - **KIMG(NE57) 를 못 버리는 이유**: 서빙 운량·일사(`total/midlow_cloud_*`, `radiation_*`)가
   NE57 분포로 학습돼 있다. 소스 전환은 재학습과 함께만.
+- **KIMG 수집 변수는 22종이다** (2026-08-12, 13종에서 확장 — **한 콜에 전부 오므로
+  호출수 증가 0**).  추가분: `tsfc`(→`temp_skin_*`) `hcld`(상층운) `dlwrsfc` `shtfl`
+  `lhtfl` `td2m`(이슬점) `q2m`(비습) `ustar` `hpbl`, 그리고 `lcld`/`mcld` 원시값
+  (기존엔 `MIDLOW_CLOUD` 로만 접혔다).
+  - ★`hpbl` 은 **KIMR 에도 있다** — 2026-06-13 "cape/cinn/hpbl 은 KIMG 에 없음" 기록은
+    **틀렸다**(2026-08-12 프로브).  `temp_skin`·`hpbl` 은 두 모델이 **같은 컬럼명**을
+    쓰므로 `forecast_kimr`/`forecast_kimg` 를 join 한 번으로 비교할 수 있다.
+    (`forecast_horizon` 에서는 `combine_first` 로 KIMR 우선·KIMG 보충이라 섞인다.)
+- **★NWP 는 일변화 진폭을 크게 눌러 재현한다** (2026-08-12 실측, 185 base):
+  실측 기온 주야 진폭 **3.36°C** vs KIMG 1.28 / KIMR 0.84.  지표온은 0.73/0.39,
+  경계층고도는 62/43m 로 거의 평평하다.  밤에 과대(+1.06)·낮에 과소(−1.03)인
+  전형적 압축이고 **두 모델 공통**이라 제주(작은 섬)의 격자 특성으로 보인다.
+  - `temp_skin`·`hpbl` 은 이래서 **패널온도·혼합층 신호로 쓰기 어렵다**.
+  - 시각별 편향은 **지평에 매우 안정**(D+1~5 거의 동일)하고 **계절엔 불안정**하다.
+    시각 보정 실측(적합 2~5월 / 홀드아웃 6~7월): KIMG −2.7%, **KIMR −13.5%**.
+    보정 후엔 KIMR(1.0078)이 KIMG(1.0450)를 **이긴다** — "기온은 KIMG 우세"라는
+    비교 결과가 사실은 **보정 가능한 편향**이었다는 뜻이다.
 - **동부(성산)는 일사계가 없다** — `historical` 에 `solar_rad_east` 컬럼 자체가 없다. 설계된 결손.
 - **SMP D+2 는 lag168**(7일 전 하루전 SMP)이 필요 — `historical` 갭이 있으면 그 기간+7일 D+2 공백.
-- 저장소는 아직 `git init` 되지 않았다. **배포는 서버에서 `git pull`** 을 전제한다
-  (사용자 확정 2026-07-31) — 그래서 무엇을 추적할지가 갈린다:
+- 저장소는 **2026-08-12 git 연결됐다** (리모트 `JeongYakyong/jeju_model.git`).
+  **배포는 서버에서 `git pull`** 을 전제한다 (사용자 확정 2026-07-31) — 그래서 무엇을 추적할지가 갈린다:
   - **추적**: `models/`(~96MB) — 가중치·메타·보정표는 **한 세트**라 통째로 넣는다.
     따로 옮기다 스케일러 하나가 어긋나면 조용히 틀린다. `data/refdata/`(외부 입력).
   - **제외**: `*.db`(서버가 자체 수집) · `logs/` · `Training/` 대용량 산출물(~233MB,
