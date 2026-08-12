@@ -220,7 +220,21 @@ SAMEDAY_18Z = False
 # u80m/v80m/gust 는 2026-06-13 추가 -- KIMR lead 한계(120h=D+5) 이후 장지평 구간의
 # 풍력 입력을 KIMG 로 잇기 위함.  cape/cinn/hpbl/tcog/tcoh 는 KIMG 에 없음
 # ("Variable not found", probe 2026-06-13).
-NAME_PARAM = "dswrsfc,t2m,tcld,mcld,lcld,u10m,v10m,rh2m,rainc_acc,rainl_acc,u80m,v80m,gust"
+# 2026-08-04 확장 (+9): 22변수가 **한 콜에 전부** 온다 -- 호출수 증가 0.
+#   tsfc    지표온(K)        -> KIMR TSKIN 과 같은 컬럼(temp_skin_*)이라 소스 비교 가능
+#   hcld    상층운(0~1)      -> 권운. 일사 투과에 크게 작용하는데 그동안 없었다
+#   dlwrsfc 하향 장파(W/m2)  -> 야간 복사냉각·운량 대리 지표
+#   shtfl   현열속(W/m2)     -> 대류 활동
+#   lhtfl   잠열속(W/m2)     -> 증발·습윤
+#   td2m    이슬점(K)        -> 안개·하층운 형성
+#   q2m     비습(kg/kg)      -> 절대습도 (rh2m 은 상대습도)
+#   ustar   마찰속도(m/s)    -> 난류 강도, 풍력 관련
+#   hpbl    경계층고도(m)    -> ★KIMR 에도 있다(HPBL). 2026-06-13 "KIMG 에 없음"
+#                              기록은 틀렸다 -- 2026-08-04 프로브로 확인
+# lcld/mcld 는 그동안 MIDLOW_CLOUD 로만 접혀 들어갔는데, 원시값도 함께 저장한다
+# (층별 운량 구조가 일사 투과와 어떻게 붙는지 보려면 raw 가 필요하다).
+NAME_PARAM = ("dswrsfc,t2m,tcld,mcld,lcld,u10m,v10m,rh2m,rainc_acc,rainl_acc,"
+              "u80m,v80m,gust,tsfc,hcld,dlwrsfc,shtfl,lhtfl,td2m,q2m,ustar,hpbl")
 
 # 응답 varn 코드 -> 내부 raw 이름.  derive_categories 가 이 dict 으로부터
 # 최종 카테고리(저장 형식)를 생성한다.  여기에 없는 varn 은 무시.
@@ -238,6 +252,16 @@ RAW_VARN_MAP = {
     26: "rh2m",       # 2m 상대습도 (%)            -> REH
     65: "rainc_acc",  # 누적 대류 강수 (kg/m^2)     -> RAIN_CONV (누적, raw)
     66: "rainl_acc",  # 누적 대규모 강수 (kg/m^2)   -> RAIN_STRAT (누적, raw)
+    # ── 2026-08-04 확장 (varn 은 실응답에서 확인) ──────────────────────────
+    19: "tsfc",       # 지표온 (K)                 -> TEMP_SKIN (°C 변환)
+    36: "hcld",       # 상층운 (fraction)          -> HIGH_CLOUD
+    50: "dlwrsfc",    # 하향 장파복사 (W/m^2)      -> LW_DOWN
+    46: "shtfl",      # 현열속 (W/m^2)             -> HEAT_SENS
+    47: "lhtfl",      # 잠열속 (W/m^2)             -> HEAT_LAT
+    30: "td2m",       # 이슬점 (K)                 -> DEWPOINT (°C 변환)
+    28: "q2m",        # 비습 (kg/kg)               -> SHUM
+    39: "ustar",      # 마찰속도 (m/s)             -> USTAR
+    38: "hpbl",       # 경계층 고도 (m)            -> HPBL (KIMR 와 같은 카테고리)
 }
 
 # 병렬 호출 설정.  probe_kim_parallel.py 결과상 6 이 안정 상한 (3.2x 실측 속도향상,
@@ -412,6 +436,33 @@ def derive_categories(rows: list[tuple[str, int, int, float]]) -> dict[str, floa
         out["RAIN_CONV"] = round(raw[65], 4)
     if 66 in raw:
         out["RAIN_STRAT"] = round(raw[66], 4)
+    # ── 2026-08-04 확장 ────────────────────────────────────────────────────
+    # 단위 관례: 온도는 °C(KIMG 는 write-time 변환), 운량은 0~1, 플럭스는 W/m^2 원단위.
+    # ★플럭스를 radiation_* 로 이름 붙이지 않는다 -- postprocess 의 _ZERO_FILL_PREFIXES
+    #   가 radiation 을 "NaN -> 0" 으로 채우는데, 장파/열속은 0 이 정상값이 아니라
+    #   결측을 0 으로 위조하게 된다.
+    if 19 in raw:
+        out["TEMP_SKIN"] = round(raw[19] - 273.15, 2)   # KIMR 와 같은 카테고리명
+    if 36 in raw:
+        out["HIGH_CLOUD"] = round(raw[36], 4)
+    if 34 in raw:
+        out["LOW_CLOUD"] = round(raw[34], 4)            # MIDLOW_CLOUD 와 별도로 raw 보존
+    if 35 in raw:
+        out["MID_CLOUD"] = round(raw[35], 4)
+    if 50 in raw:
+        out["LW_DOWN"] = round(raw[50], 2)              # W/m^2
+    if 46 in raw:
+        out["HEAT_SENS"] = round(raw[46], 2)            # W/m^2
+    if 47 in raw:
+        out["HEAT_LAT"] = round(raw[47], 2)             # W/m^2
+    if 30 in raw:
+        out["DEWPOINT"] = round(raw[30] - 273.15, 2)    # °C
+    if 28 in raw:
+        out["SHUM"] = round(raw[28], 6)                 # kg/kg (작은 값이라 6자리)
+    if 39 in raw:
+        out["USTAR"] = round(raw[39], 4)                # m/s
+    if 38 in raw:
+        out["HPBL"] = round(raw[38], 2)                 # m -- KIMR HPBL 과 cross-join
     return out
 
 

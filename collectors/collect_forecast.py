@@ -376,6 +376,7 @@ def build_forecast_wide(
         # 글로벌을 읽으므로 밖에서 부르면 기본 2일로 잡혀 build_wide 가 D+2 까지로
         # 잘라버린다(KIMG 는 7일치를 받아도 결과가 48행이 되는 함정).
         window_start, window_end = _window_for(bases)
+        days_eff = ckg.FORECAST_DAYS   # ★override 밖에서는 기본값(2)으로 돌아간다
         # 기대 timestamp 집합도 여기서 뽑는다 (아래 결손 보간의 그리드).
         expected = sorted(set().union(
             *(expected_timestamps(b, ckg.FORECAST_DAYS) for b in bases)))
@@ -400,11 +401,89 @@ def build_forecast_wide(
     wide, _filled = pp.fill_short_gaps(wide, expected)
     if wide.empty:
         return wide
+    # ③ 그래도 빈 일사·운량은 KIMR(NC)로 대체 -- 사다리의 마지막 칸.
+    wide = _substitute_solar_cloud(wide, bases, window_start, window_end, days_eff)
     # postprocess: 범위 clip + day_type.  day_type 은 forecast_horizon 적재 시
     # _upsert_df 의 is_non_kma 필터가 떼므로 무해하지만 빌더 일관성 위해 적용.
     wide = pp.clip_ranges(wide)
     wide = pp.add_day_type(wide)
     return wide
+
+# ── KIMG 실패 시 일사·운량 대체 (사다리 ③) ─────────────────────────────────
+SOLAR_CLOUD_PREFIX = ("radiation", "total_cloud", "midlow_cloud")
+SRC_SOLAR_CLOUD = "src_solar_cloud"   # 'KIMG'(정상) / 'KIMR'(대체) -- 출처 통보용
+
+
+def _substitute_solar_cloud(wide, bases, window_start, window_end, days):
+    """보간 뒤에도 비어 있는 일사·운량을 KIMR(NC)로 채운다.  출처를 컬럼에 남긴다.
+
+    ★순서가 핵심이다 -- `fill_short_gaps` **다음**에 온다.
+      짧은 결손(연속 2개 = 3h 사고)은 시간 보간이 KIMR 대체보다 훨씬 낫다.
+      2026-07-02~11 사고를 정답(재수집본)과 대조한 실측, 결손 780칸:
+          시간 보간   MAE 0.063~0.106  r 0.81~0.90  큰오차 3.8~9.9%
+          KIMR 대체   MAE 0.346~0.490  r 0.25~0.43  큰오차 43~59%
+      두 모델이 다른 구름을 본다(전운량 r 0.47).  그래서 KIMR 은 **보간이 못 메운
+      자리에만** 들어간다.
+    ★그래도 두는 이유: KIMG 가 통째로 안 오면 보간할 이웃이 없다.  그때는
+      "예측 없음"보다 "오차 있는 예측 + 출처 통보"가 낫다 (사용자 결정 2026-08-12).
+    ★KIMR lead 는 120h 라 D+1~5 를 거의 덮는다(꼬리 2h 는 못 채운다).
+    ★`days` 는 **반드시 인자로 받는다** -- 이 함수는 `forecast_days_override` 밖에서
+      불리므로 `ckg.FORECAST_DAYS` 를 직접 읽으면 기본값 2 로 돌아가 창이 48시각으로
+      잘린다 (2026-08-12 실패 시나리오 테스트에서 잡았다).
+    """
+    # 기대 컬럼 = 3지점 × (일사·전운량·중하운량).  **컬럼이 아예 없는 것도 결손**이다
+    # (KIMG 가 통째로 실패하면 build_wide 가 그 컬럼을 만들지 못한다).
+    want = [f"{p}_{s}" for p in SOLAR_CLOUD_PREFIX for s in ci.POINT_SUFFIX.values()]
+    have = wide.reindex(columns=want)      # 없는 컬럼은 전부 NaN 으로 채워 셈한다
+    n_missing = int(have.isna().sum().sum())
+    if n_missing == 0:
+        wide[SRC_SOLAR_CLOUD] = SRC_KIMG
+        return wide
+
+    print(f"  [사다리③] 일사·운량 결손 {n_missing}셀 -- KIMR(NC)로 대체 시도")
+    try:
+        sub_long = pd.concat(
+            [kimr.fetch_kimr_solar_cloud_long(kimr.POINTS_JEJU_V2, b, days)
+             for b in bases], ignore_index=True)
+    except Exception as e:
+        print(f"  [WARN] KIMR 대체 fetch 실패: {e} -- 결손을 그대로 둔다")
+        wide[SRC_SOLAR_CLOUD] = SRC_KIMG
+        return wide
+    if sub_long.empty:
+        print("  [WARN] KIMR 대체분이 비었다 -- 결손을 그대로 둔다")
+        wide[SRC_SOLAR_CLOUD] = SRC_KIMG
+        return wide
+
+    # 라벨을 KIMG 관례로 냈으므로 같은 피벗(_SPEC_KIMG)·kimg_solar 가 그대로 쓰인다.
+    parts = []
+    for point, suffix in ci.POINT_SUFFIX.items():
+        part = ci.kimg_one_point(sub_long, point, suffix, window_start, window_end)
+        rad = ci.kimg_solar(
+            sub_long[(sub_long["category"] == "SOLAR_RAD")
+                     & (sub_long["point_name"] == point)], suffix)
+        if not rad.empty:
+            part = rad.to_frame() if part.empty else part.join(rad, how="outer")
+        if not part.empty:
+            parts.append(part)
+    if not parts:
+        wide[SRC_SOLAR_CLOUD] = SRC_KIMG
+        return wide
+    sub = pd.concat(parts, axis=1)
+    sub.index = pd.to_datetime(sub.index, format="%Y-%m-%d %H:%M").strftime(
+        "%Y-%m-%d %H:%M:%S")
+    sub = sub[[c for c in sub.columns
+               if any(c.startswith(p + "_") for p in SOLAR_CLOUD_PREFIX)]]
+
+    was_na = wide.reindex(columns=want).isna()        # 대체 **전** 결손 (컬럼 없음 포함)
+    wide = wide.combine_first(sub.reindex(wide.index))   # 빈 칸만 채운다
+    now_na = wide.reindex(columns=want).isna()           # 대체 **후** 결손 (같은 컬럼 집합)
+    filled_cells = was_na & ~now_na
+    filled, after = int(filled_cells.sum().sum()), int(now_na.sum().sum())
+    print(f"  [사다리③] KIMR 로 {filled}셀 채움 (남은 결손 {after}셀)")
+    # 실제로 채워진 시각만 'KIMR' 로 표기 -- 화면·검증이 출처를 볼 수 있게.
+    wide[SRC_SOLAR_CLOUD] = np.where(filled_cells.any(axis=1), SRC_KIMR, SRC_KIMG)
+    return wide
+
 
 # ═══ ④ 적재 엔진 (forecast_horizon) ═══════════════════════════════════
 def is_non_kma(col: str) -> bool:

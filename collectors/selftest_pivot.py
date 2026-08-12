@@ -84,6 +84,32 @@ expected_g = ["temp_west",
               "gust_west", "reh_west", "total_cloud_west", "midlow_cloud_west"]
 check("① KIMG 컬럼 순서", list(out_g.columns) == expected_g, f"got {list(out_g.columns)}")
 
+# ①-2 KIMG 2026-08-04 확장분 — 22변수 세트가 기대 컬럼으로 떨어지는가.
+#     확장은 **스펙 뒤에만** 붙였으므로 기존 11컬럼 순서가 그대로 앞에 와야 한다.
+full_kimg2 = dict(full_kimg, **{c: 1.0 for c in (
+    "TEMP_SKIN", "LOW_CLOUD", "MID_CLOUD", "HIGH_CLOUD", "LW_DOWN",
+    "HEAT_SENS", "HEAT_LAT", "DEWPOINT", "SHUM", "USTAR", "HPBL")})
+out_g2 = aj.kimg_one_point(long_rows(full_kimg2), PT, "west", W0, W1)
+expected_g2 = expected_g + [
+    "temp_skin_west", "low_cloud_west", "mid_cloud_west", "high_cloud_west",
+    "lwdown_west", "heat_sens_west", "heat_lat_west", "dewpoint_west",
+    "shum_west", "ustar_west", "hpbl_west"]
+check("①-2 KIMG 확장 컬럼 순서 (기존 11개가 앞, 확장 11개가 뒤)",
+      list(out_g2.columns) == expected_g2, f"got {list(out_g2.columns)}")
+
+# ①-3 KIMR 과 겹치는 컬럼은 **이름이 같아야** 소스 비교가 join 한 번으로 된다.
+_shared = {"temp_skin_west", "hpbl_west"}
+check("①-3 KIMR·KIMG 공통 컬럼명 일치 (temp_skin/hpbl)",
+      _shared <= set(out.columns) and _shared <= set(out_g2.columns),
+      f"KIMR={_shared & set(out.columns)} KIMG={_shared & set(out_g2.columns)}")
+
+# ①-4 KIMG TEMP_SKIN 은 이미 °C 라 변환하지 않는다 (KIMR 은 K→°C).
+_r = aj.kimr_one_point(long_rows({"TEMP_SKIN": 300.0}), PT, "west", W0, W1)
+_g = aj.kimg_one_point(long_rows({"TEMP_SKIN": 26.85}), PT, "west", W0, W1)
+check("①-4 temp_skin 단위 (KIMR 300K→26.85 / KIMG 26.85 그대로)",
+      _r["temp_skin_west"].iloc[0] == 26.85 and _g["temp_skin_west"].iloc[0] == 26.85,
+      f"KIMR={_r['temp_skin_west'].iloc[0]} KIMG={_g['temp_skin_west'].iloc[0]}")
+
 # ② 반올림 — reh 는 KIMR 4자리 / KIMG 2자리 (모델별로 다르다)
 r = aj.kimr_one_point(long_rows({"REH": 55.123456}), PT, "west", W0, W1)
 g = aj.kimg_one_point(long_rows({"REH": 55.123456}), PT, "west", W0, W1)

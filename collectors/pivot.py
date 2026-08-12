@@ -80,6 +80,20 @@ _SPEC_KIMG = [
     ("REH",           "reh",           False, 2),
     ("TCLD",          "total_cloud",   False, 4),
     ("MIDLOW_CLOUD",  "midlow_cloud",  False, 4),
+    # ── 2026-08-04 확장 (KIMG 22변수).  **뒤에만 붙인다** — 앞을 건드리면 기존 컬럼
+    #    순서가 바뀌어 selftest ① 이 잡는다.  KIMR 에도 있는 것(temp_skin/hpbl)은
+    #    **같은 컬럼명**을 쓴다: 소스 비교가 join 한 번으로 되게 하려는 것이다.
+    ("TEMP_SKIN",     "temp_skin",     False, 2),   # KIMG 는 이미 °C (KIMR 은 K→°C)
+    ("LOW_CLOUD",     "low_cloud",     False, 4),
+    ("MID_CLOUD",     "mid_cloud",     False, 4),
+    ("HIGH_CLOUD",    "high_cloud",    False, 4),
+    ("LW_DOWN",       "lwdown",        False, 2),   # W/m^2 (radiation_* 는 MJ/m^2/h)
+    ("HEAT_SENS",     "heat_sens",     False, 2),   # W/m^2
+    ("HEAT_LAT",      "heat_lat",      False, 2),   # W/m^2
+    ("DEWPOINT",      "dewpoint",      False, 2),   # °C
+    ("SHUM",          "shum",          False, 6),   # kg/kg
+    ("USTAR",         "ustar",         False, 4),   # m/s
+    ("HPBL",          "hpbl",          False, 4),   # m -- KIMR HPBL 과 같은 컬럼
 ]
 
 

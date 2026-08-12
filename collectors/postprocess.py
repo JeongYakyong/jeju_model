@@ -19,7 +19,7 @@
 물리적 범위
 - 온도 (temp/temp_c/temp_skin)              : -50 ~ 50 °C, 밖은 NaN.
 - 습도 (humidity/reh)                       : 0 ~ 100 %, 밖은 NaN.
-- 운량 (total_cloud/midlow_cloud)           : 0 ~ 1, 밖은 NaN.  (KIMR 의 tcog/tcoh
+- 운량 (total/midlow/low/mid/high_cloud)    : 0 ~ 1, 밖은 NaN.  (KIMR 의 tcog/tcoh
   는 cloud fraction 이 아니라 kg/m^2 column water 라 여기 안 들어감.)
 - 풍속 / 돌풍 (wind_spd/gust)               : 0 ~ 100 m/s, 밖은 NaN.
 - 풍향 sin/cos (wd_sin/wd_cos)              : -1 ~ 1, 밖은 NaN.
@@ -60,7 +60,8 @@ import holidays
 # 모든 location suffix(west/east/south/land/무) 에 자동 적용되도록 prefix 매칭.
 _TEMP_PREFIXES = ("temp", "temp_skin", "temp_c")
 _HUMID_PREFIXES = ("humidity", "reh")
-_CLOUD_PREFIXES = ("total_cloud", "midlow_cloud")
+# low/mid/high 는 2026-08-04 KIMG 확장분 (층별 원시 운량).  전부 0~1 분율.
+_CLOUD_PREFIXES = ("total_cloud", "midlow_cloud", "low_cloud", "mid_cloud", "high_cloud")
 _WIND_PREFIXES = ("wind_spd", "gust")
 _TRIG_PREFIXES = ("wd_sin", "wd_cos")
 # NaN -> 0 채움 대상.  ASOS solar_rad 는 여기 넣지 않는다 -- fetch_asos 가 이미

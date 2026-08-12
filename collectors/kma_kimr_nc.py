@@ -372,6 +372,46 @@ def fetch_kimr_met_long(points: list[dict], base_utc: datetime, days: int,
                          label="KIMR-met")
 
 
+# ── KIMG 대체용 일사·운량 (KIMG 수집 실패 시 마지막 사다리) ──────────────────
+# ★언제 쓰나: `collect_forecast` 가 KIMG 를 통째로(또는 길게) 못 받았을 때.
+#   짧은 결손(연속 2개 = 3h 사고)은 시간 보간이 훨씬 낫다 — 2026-07-02~11 사고를
+#   정답과 대조한 실측: 보간 MAE 0.063~0.106 (r 0.81~0.90) vs KIMR 대체 0.346~0.490
+#   (r 0.25~0.43, 큰 오차 43~59%).  두 모델이 **다른 구름을 본다**(2026-07-31: 전운량
+#   r 0.47).  그래서 이 함수는 **보간이 못 메운 자리에만** 쓴다.
+# ★그래도 쓰는 이유: base 통째 실패면 보간할 이웃이 없다.  "예측 없음" 보다
+#   "오차 있는 예측 + 출처 통보" 가 운영상 낫다 (사용자 결정 2026-08-12).
+# 라벨을 **KIMG 관례**(SOLAR_RAD / TCLD / MIDLOW_CLOUD)로 내보내므로 뒤따르는
+# 피벗(`pivot._SPEC_KIMG`)과 `kimg_solar` 가 무수정으로 성립한다.
+NAME_SOLAR_SUB = "SWDDIR2,SWDDIF2"
+
+
+def _derive_solar_kimg_labels(raw: dict[str, float]) -> dict[str, float]:
+    """SWDDIR2+SWDDIF2 -> SOLAR_RAD (MJ/m^2/h).  KIMG dswrsfc 와 같은 단위·라벨."""
+    if "SWDDIR2" in raw and "SWDDIF2" in raw:
+        return {"SOLAR_RAD": round((raw["SWDDIR2"] + raw["SWDDIF2"]) * 0.0036, 4)}
+    return {}
+
+
+def fetch_kimr_solar_cloud_long(points: list[dict], base_utc: datetime, days: int,
+                                workers: int = NC_WORKERS) -> pd.DataFrame:
+    """KIMG 대체용 일사·운량 long (라벨은 KIMG 관례).
+
+    일사 = std NC 순시 GHI(SWDDIR2+SWDDIF2), 운량 = 등압면 CLDFRA 24레벨 결합.
+    반환 카테고리: SOLAR_RAD / TCLD / MIDLOW_CLOUD.
+    """
+    rad = fetch_nc_long(points, base_utc, days, NAME_SOLAR_SUB,
+                        _derive_solar_kimg_labels, workers=workers,
+                        label="KIMR-sub-rad")
+    cld = fetch_r030_cldfra_long(points, base_utc, days, R030_MAX_HF)
+    if not cld.empty:
+        cld = cld.replace({"category": {"CLOUD_TOTAL_R030": "TCLD",
+                                        "CLOUD_MIDLOW_R030": "MIDLOW_CLOUD"}})
+    parts = [d for d in (rad, cld) if not d.empty]
+    if not parts:
+        return pd.DataFrame(columns=LONG_COLS)
+    return pd.concat(parts, ignore_index=True)
+
+
 # ── long -> wide 피벗 (cl.kimg_land_long_to_wide 의 파라미터화 사본) ─────────
 # 원본(collect_data_land.py:191-273)은 POINT_SUFFIX 5지점 dict 가 하드코딩이라
 # 지점 확장이 안 된다.  수식·반올림을 자구 그대로 옮기고 suffix 맵만 주입 --
