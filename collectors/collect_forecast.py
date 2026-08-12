@@ -403,6 +403,9 @@ def build_forecast_wide(
         return wide
     # ③ 그래도 빈 일사·운량은 KIMR(NC)로 대체 -- 사다리의 마지막 칸.
     wide = _substitute_solar_cloud(wide, bases, window_start, window_end, days_eff)
+    # ④ sentinel 정정 -- 9999 는 이상치가 아니라 "값 없음"이라 NaN 이 정직하다.
+    #    clip_ranges 앞에 둔다 (뒤에 두면 9999 가 범위검사·통계에 그대로 섞인다).
+    wide, _ = pp.drop_sentinels(wide)
     # postprocess: 범위 clip + day_type.  day_type 은 forecast_horizon 적재 시
     # _upsert_df 의 is_non_kma 필터가 떼므로 무해하지만 빌더 일관성 위해 적용.
     wide = pp.clip_ranges(wide)
@@ -787,6 +790,7 @@ def run_region(
     통일(과거 count 기준은 부분 적재 base 를 못 채웠다).
     """
     total = 0
+    warnings: list[str] = []
     for i, b in enumerate(bases, 1):
         base_str = b.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
         label = f"[runs:{region}] base {b.strftime('%Y%m%d %HZ')} ({base_str} KST)"
@@ -802,6 +806,12 @@ def run_region(
         if wide.empty:
             print(f"{label} -- [WARN] empty wide, nothing to write")
             continue
+        # ★적재 직전 건전성 검사.  값은 고치지 않고 **드러내기만** 한다 --
+        #   무엇이 이상인지는 사람이 판단해야 하고, 잘못 고치면 더 나쁘다.
+        #   (2026-07-02~11 운량 사고가 10 base 동안 조용했던 게 이 검사가 없어서다.)
+        for w in pp.sanity_check(wide, label=f"[sanity {b:%Y%m%d}]"):
+            print(f"  ⚠ {w}")
+            warnings.append(w)
         n = upsert_runs(wide, b, db_path)
         total += n
         h = pd.Series(
@@ -812,11 +822,13 @@ def run_region(
             f"{label} -- UPSERT {n:,} rows -> {db_path.name}::{RUNS_TABLE} "
             f"(horizon D+{h.min()}~D+{h.max()})"
         )
-    return total
+    if warnings:
+        print(f"\n[sanity:{region}] 건전성 경고 {len(warnings)}건 -- 위 로그 확인")
+    return total, warnings
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser(
         description=(
             "KMA 발표(기본 12 UTC, --utc 로 변경)를 horizon-tagged 로 forecast_horizon 에 적재 "
@@ -886,16 +898,17 @@ def main() -> None:
         print(f"[collect_forecast] 18z 당일예보 모드 (창 = 당일 04시~, days={args.days})")
 
     if args.verify:
+        bad = []
         for region in regions:
-            verify_runs(region_db(region, args.out), region, args.out, args.days)
+            bad += verify_runs(region_db(region, args.out), region, args.out, args.days)
             print()
-        return
+        return 1 if bad else 0      # 스크립트에서 rc 로 판정할 수 있게
 
     if args.merge:
         print(f"[collect_forecast] merge '{args.merge}' -> main DBs")
         for region in regions:
             merge_runs(region_db(region, args.merge), REGIONS[region]["db"])
-        return
+        return 0
 
     if args.base:
         bases = [datetime.strptime(args.base, "%Y%m%d").replace(hour=args.utc, tzinfo=UTC)]
@@ -913,14 +926,21 @@ def main() -> None:
     )
 
     t0 = time.time()
+    all_warnings: list[str] = []
     for region in regions:
         days = args.days if args.days is not None else REGIONS[region]["days"]
         db_path = region_db(region, args.out)
-        n = run_region(region, bases, days, args.force, db_path)
+        n, warns = run_region(region, bases, days, args.force, db_path)
+        all_warnings += warns
         print(f"\n[runs:{region}] total UPSERT {n:,} rows -> {db_path.name}")
     print(f"\n[collect_forecast] done in {(time.time()-t0)/60:.1f}m")
-
+    if all_warnings:
+        # rc=1 로 올려 run_pipeline 의 단계별 rc 요약에 남게 한다.  적재는 이미 끝났고
+        # (부분 결과라도 남기는 게 낫다) "확인이 필요하다"는 신호만 준다.
+        print(f"[collect_forecast] ⚠ 건전성 경고 {len(all_warnings)}건 -- rc=1")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

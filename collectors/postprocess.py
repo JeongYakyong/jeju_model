@@ -157,6 +157,115 @@ def clip_ranges(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ── sentinel: "값이 아니라 없음" ─────────────────────────────────────────────
+# ★9999 는 **이상치가 아니라 결측**이다.  cape/cinn 에서 9999 = "대류불안정 없음"
+#   (Training EDA 3cmp-2 기록).  숫자로 두면 평균·상관·모델 입력이 통째로 망가진다
+#   -- 구 GRIB 구간의 forecast_horizon 은 cape 57% / cinn 68% 가 9999 다.
+#   NC 경로는 9999 를 내지 않으므로(2026-08-04 실측 0건) 신규 수집분엔 무영향이고,
+#   API 가 다시 내보내기 시작해도 여기서 막힌다.
+SENTINEL_VALUES = (9999.0, -9999.0)
+SENTINEL_PREFIXES = ("cape", "cinn")
+
+
+def drop_sentinels(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """cape/cinn 의 sentinel(9999)을 NaN 으로.  반환 (df, 바꾼 셀 수).
+
+    "이상치 제거"가 아니라 **결측 표기 정정**이다 -- 그 시각에 값이 없었다는 뜻이므로
+    NaN 이 정직한 표현이고, 다운스트림(평균·상관·학습)이 알아서 빼고 센다.
+    """
+    if df.empty:
+        return df, 0
+    out = df.copy()
+    n = 0
+    for col in out.columns:
+        if not _match(col, SENTINEL_PREFIXES):
+            continue
+        if not pd.api.types.is_numeric_dtype(out[col]):
+            continue
+        hit = out[col].isin(SENTINEL_VALUES)
+        if hit.any():
+            n += int(hit.sum())
+            out.loc[hit, col] = pd.NA
+    if n:
+        print(f"  postprocess.drop_sentinels: 9999 sentinel -> NaN ({n}셀) "
+              f"— 이상치가 아니라 '값 없음'이다")
+    return out, n
+
+
+# ── 건전성 검사 (수집 직후) ──────────────────────────────────────────────────
+# clip_ranges 는 범위 **밖**만 잡는다.  범위 **안**의 이상 -- 얼어붙은 값, 급변,
+# 변수끼리의 모순 -- 은 아무도 못 잡아서 2026-07-02~11 운량 사고가 10 base 동안
+# 조용히 지나갔다.  여기서 잡아 경고로 올린다 (값은 건드리지 않는다: 무엇이
+# 이상인지 사람이 판단해야 하고, 잘못 고치면 더 나쁘다).
+_MUST_VARY = ("temp", "reh", "wind_spd_10m")     # 5일 창에서 상수면 수집 이상
+_JUMP_LIMIT = {"temp": 5.0, "reh": 40.0, "wind_spd_10m": 15.0, "dewpoint": 5.0}
+
+
+def sanity_check(df: pd.DataFrame, label: str = "") -> list[str]:
+    """수집 직후 건전성 검사.  경고 문자열 목록 반환 (빈 목록 = 이상 없음).
+
+    값을 고치지 않는다 -- **드러내는 것**이 목적이다.  호출자가 rc 에 반영한다.
+    sentinel(9999)은 이미 drop_sentinels 가 NaN 으로 바꾼 뒤라 결측으로 세어진다.
+    """
+    if df.empty:
+        return [f"{label} wide 가 비었다"]
+    warn: list[str] = []
+    num = df.select_dtypes(include="number")
+
+    # ⓪ 결측률 -- 소스가 공급해야 하는 대표 컬럼이 비면 수집 사고다.
+    #    (2026-07-02~11 은 운량만 3h 로 떨어졌는데 temp 는 멀쩡해서 아무도 몰랐다.)
+    for pref in ("temp", "total_cloud", "radiation"):
+        cols = [c for c in num.columns if _match(c, (pref,))
+                and not c.startswith("temp_skin")]
+        if not cols:
+            warn.append(f"{label} {pref}_* 컬럼이 없다 -- 소스 실패 의심")
+            continue
+        na = num[cols].isna().mean().mean()
+        if na > 0.02:
+            warn.append(f"{label} {pref}_* 결측 {na*100:.1f}% "
+                        f"({int(num[cols].isna().sum().sum())}셀) -- 수집 사고 의심")
+
+    # ① 얼어붙음 -- 5일 창에서 상수인 변수는 수집이 멈춘 것이다
+    for col in num.columns:
+        if not _match(col, _MUST_VARY):
+            continue
+        v = num[col].dropna()
+        if len(v) > 10 and v.nunique() == 1:
+            warn.append(f"{label} {col}: 전 구간 상수({v.iloc[0]}) — 수집 이상 의심")
+
+    # ② 급변 -- 1시간 사이 물리적으로 어려운 변화
+    for col in num.columns:
+        base_pref = next((p for p in _JUMP_LIMIT if _match(col, (p,))), None)
+        if base_pref is None:
+            continue
+        d = num[col].diff().abs()
+        n = int((d > _JUMP_LIMIT[base_pref]).sum())
+        if n:
+            warn.append(f"{label} {col}: 1h 급변 {n}회 "
+                        f"(>{_JUMP_LIMIT[base_pref]}, 최대 {d.max():.1f})")
+
+    # ③ 변수끼리의 모순 -- 하나라도 있으면 파생이나 소스가 어긋난 것이다
+    for sfx in ("west", "east", "south"):
+        t, td = f"temp_{sfx}", f"dewpoint_{sfx}"
+        if t in num and td in num:
+            n = int((num[td] > num[t] + 0.5).sum())
+            if n:
+                warn.append(f"{label} 이슬점 > 기온 ({sfx}) {n}회")
+        w, g = f"wind_spd_10m_{sfx}", f"gust_{sfx}"
+        if w in num and g in num:
+            n = int((num[g] < num[w] - 0.1).sum())
+            if n:
+                warn.append(f"{label} 돌풍 < 풍속 ({sfx}) {n}회")
+        tc = f"total_cloud_{sfx}"
+        layers = [f"{p}_{sfx}" for p in ("low_cloud", "mid_cloud", "high_cloud")
+                  if f"{p}_{sfx}" in num]
+        if tc in num and layers:
+            n = int((num[layers].max(axis=1) > num[tc] + 0.02).sum())
+            if n:
+                warn.append(f"{label} 층별운량 > 전운량 ({sfx}) {n}회")
+    return warn
+
+
 def fill_short_gaps(
     df: pd.DataFrame, index, limit: int = 2,
 ) -> tuple[pd.DataFrame, int]:
