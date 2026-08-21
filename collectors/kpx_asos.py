@@ -258,6 +258,14 @@ def _fetch_kpx_est_one_day(target_date: str, service_key: str) -> pd.DataFrame:
         if _col not in df.columns:
             df[_col] = pd.NA
 
+    # KPX 는 1~9 시를 '01' 과 '1' 두 형식으로 각각 한 번씩 내려준다 (2026-08-21 확인 --
+    # 하루 48 행이 아니라 66 행).  rn 을 뺀 나머지 값이 완전히 같은 단순 중복이므로
+    # hour 를 정수로 통일한 뒤 (date, hour, areaName) 기준 하나만 남긴다.
+    # 이 정리를 건너뛰면 아래 merge 가 같은 시각을 두 행으로 만들고,
+    # build_historical 의 concat 이 InvalidIndexError 로 죽는다.
+    df["hour"] = df["hour"].astype(int)
+    df = df.drop_duplicates(subset=["date", "hour", "areaName"], keep="first")
+
     # 제주 행: smp_jeju_da + jeju_est_demand_da(jlfd) 만 사용.
     # 육지 행: smp_land_da + land_est_demand_da(mlfd) 만 사용.
     # slfd = jlfd + mlfd 라 별도 저장 안 함.
@@ -268,10 +276,10 @@ def _fetch_kpx_est_one_day(target_date: str, service_key: str) -> pd.DataFrame:
         columns={"smp": "smp_land_da", "mlfd": "land_est_demand_da"}
     )
     merged = pd.merge(df_jeju, df_land, on=["date", "hour"], how="outer")
-    # KPX 의 hour 는 1..24 -> 00:00 ~ 23:00 으로 매핑 (hour-1).
+    # KPX 의 hour 는 1..24 -> 00:00 ~ 23:00 으로 매핑 (hour-1).  위에서 int 로 통일했다.
     merged["timestamp"] = (
         pd.to_datetime(merged["date"], format="%Y%m%d")
-        + pd.to_timedelta(merged["hour"].astype(int) - 1, unit="h")
+        + pd.to_timedelta(merged["hour"] - 1, unit="h")
     ).dt.strftime("%Y-%m-%d %H:%M:%S")
     out_cols = [
         "smp_jeju_da", "smp_land_da",
