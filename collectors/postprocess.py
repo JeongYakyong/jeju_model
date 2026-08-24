@@ -198,7 +198,13 @@ def drop_sentinels(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 # 조용히 지나갔다.  여기서 잡아 경고로 올린다 (값은 건드리지 않는다: 무엇이
 # 이상인지 사람이 판단해야 하고, 잘못 고치면 더 나쁘다).
 _MUST_VARY = ("temp", "reh", "wind_spd_10m")     # 5일 창에서 상수면 수집 이상
-_JUMP_LIMIT = {"temp": 5.0, "reh": 40.0, "wind_spd_10m": 15.0, "dewpoint": 5.0}
+_JUMP_LIMIT = {"temp": 5.0, "reh": 40.0, "wind_spd_10m": 15.0, "dewpoint": 5.0,
+               # 지표온은 기온보다 원래 훨씬 빨리 움직인다 -- 일출·일몰에 5~6°C/h 는 정상이다.
+               # 실측 분포(2026-06~08, 81 base): temp_* 는 최대 5.0 이하인데 temp_skin_east 는
+               # p99 5.94 / 최대 9.99 로 1h 변화의 2.3% 가 5.0 을 넘는다.  'temp_' 로 시작해
+               # 기온 한계를 물려받는 바람에 **매 base 경보**가 떴다 (2026-08-24).
+               # 관측 최대 위에 여유를 둔다 -- 단위 착오(K↔°C ~273)나 sentinel 은 여전히 잡힌다.
+               "temp_skin": 12.0}
 
 
 def sanity_check(df: pd.DataFrame, label: str = "") -> list[str]:
@@ -235,7 +241,10 @@ def sanity_check(df: pd.DataFrame, label: str = "") -> list[str]:
 
     # ② 급변 -- 1시간 사이 물리적으로 어려운 변화
     for col in num.columns:
-        base_pref = next((p for p in _JUMP_LIMIT if _match(col, (p,))), None)
+        # 가장 구체적인(= 가장 긴) 접두사를 고른다.  temp_skin_east 는 "temp" 와
+        # "temp_skin" 둘 다에 걸리는데, dict 순서에 기대면 조용히 틀린 한계를 쓴다.
+        base_pref = max((p for p in _JUMP_LIMIT if _match(col, (p,))),
+                        key=len, default=None)
         if base_pref is None:
             continue
         d = num[col].diff().abs()
