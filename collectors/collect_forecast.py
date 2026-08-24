@@ -74,7 +74,7 @@ class NoUsableForecastRows(Exception):
     """
 
 # ── API → in-memory long DataFrame ──────────────────────────────────────
-def fetch_kimr_long(bases: list[datetime]) -> pd.DataFrame:
+def fetch_kimr_long(bases: list[datetime], point_workers: int = 3) -> pd.DataFrame:
     """주어진 bases 에 대해 KIMR(R030 std NC)을 호출하고 long 5컬럼 DF 반환.
 
     수집 스택은 `kma_kimr_nc.fetch_kimr_met_long` 한 벌(지점 순차 × hf 병렬 8워커 +
@@ -91,6 +91,7 @@ def fetch_kimr_long(bases: list[datetime]) -> pd.DataFrame:
         try:
             part = kimr.fetch_kimr_met_long(
                 kimr.POINTS_JEJU_V2, base, ckg.FORECAST_DAYS,
+                point_workers=point_workers,
             )
         except Exception as e:
             print(f"  [WARN] KIMR {base_label}: {e}")
@@ -359,6 +360,7 @@ def build_forecast_wide(
     base: datetime | None = None,
     n_bases: int = 2,
     forecast_days: int | None = None,
+    point_workers: int = 3,
 ) -> pd.DataFrame:
     """제주 KIMR+KIMG 병합 기상만 메모리 wide 로 반환.  KPX(*_da) 호출 없음, DB 쓰기 없음.
 
@@ -380,9 +382,13 @@ def build_forecast_wide(
         # 기대 timestamp 집합도 여기서 뽑는다 (아래 결손 보간의 그리드).
         expected = sorted(set().union(
             *(expected_timestamps(b, ckg.FORECAST_DAYS) for b in bases)))
-        # KIMR = std NC per-hf (지점 순차 × hf 8워커).  아카이브(collect_archive)가
-        # 161일 백필로 검증한 것과 같은 스택이다.
-        kimr_long = fetch_kimr_long(bases)
+        # KIMR = std NC per-hf.  아카이브(collect_archive)가 161일 백필로 검증한
+        # 것과 같은 스택이다.  여기가 오래 순차였고 base 당 시간의 대부분을 먹었다
+        # (2026-08-24 측정: forecast 6.4분/base vs archive 1.7분/base).
+        # point_workers 기본 3 = 3 지점 동시 (사용자 결정 2026-08-24).
+        # 동시성 = N x 8.  hf 결손이 보이면 --point-workers 2 또는 1 로 내린다 --
+        # `--verify` 와 수집 로그의 "n/n시각" 커버리지가 판정 근거다.
+        kimr_long = fetch_kimr_long(bases, point_workers=point_workers)
         # KIMG 지점 병렬 opt-in.  3 지점 전부 동시(동시성 3×6=18)는 KMA 504 로 hf 가
         # 빠져(2026-06-16 실측) 2 지점 동시(동시성 12)로 낮춘다 -- 1 point(=6)가 원래
         # 안전했던 기준선과의 절충.  여전히 빠지면 1(순차)로 더 내릴 것.
@@ -699,7 +705,8 @@ def disable_kpx() -> None:
 
 # ═══ ⑤ 진입점: base 선택 + 완결성 skip + CLI ═══════════════════════════
 # ── fetch: 네이티브 clean wide (KMA 전용, KPX 경로 자체가 없음) ──────────────
-def fetch_one(region: str, base_utc: datetime, days: int) -> pd.DataFrame:
+def fetch_one(region: str, base_utc: datetime, days: int,
+              point_workers: int = 3) -> pd.DataFrame:
     """단일 base 의 기상 wide 를 메모리로 반환 (KMA 전용).
 
     jeju : build_forecast_wide (KIMR+KIMG 병합 3 지점, 일사 3지점).
@@ -707,7 +714,8 @@ def fetch_one(region: str, base_utc: datetime, days: int) -> pd.DataFrame:
     """
     if region != "jeju":
         raise SystemExit(f"[collect_forecast] 지원하지 않는 권역 '{region}' (제주 전용)")
-    return build_forecast_wide(base=base_utc, forecast_days=days)
+    return build_forecast_wide(base=base_utc, forecast_days=days,
+                               point_workers=point_workers)
 
 
 # ── base 선택: 발행시각(UTC) 일반화 ────────────────────────────────────────
@@ -781,6 +789,7 @@ def base_complete(region: str, db_path: Path, base_utc: datetime, days: int) -> 
 
 def run_region(
     region: str, bases: list[datetime], days: int, force: bool, db_path: Path,
+    point_workers: int = 3,
 ) -> int:
     """base 목록을 차례로 수집 → forecast_horizon 적재 (완결성 기반 skip).
 
@@ -799,7 +808,7 @@ def run_region(
             continue
         print(f"\n{'='*70}\n{label}  ({i}/{len(bases)}, window={days}d)\n{'='*70}")
         try:
-            wide = fetch_one(region, b, days)
+            wide = fetch_one(region, b, days, point_workers=point_workers)
         except Exception as e:
             print(f"{label} -- [WARN] fetch failed: {e} (skip)")
             continue
@@ -878,6 +887,11 @@ def main() -> int:
         "--min-hf", type=int, default=0, metavar="H",
         help="이 hf(시간) 이상만 수집 -- 장지평 증분 백필용 (기존 짧은 지평 재호출 생략)",
     )
+    p.add_argument(
+        "--point-workers", type=int, default=3, metavar="N",
+        help="KIMR 지점 병렬 수 (기본 3 = 3 지점 동시).  동시성 = N x 8.  "
+             "1 로 내리면 순차(가장 안전), 2 는 절충.",
+    )
     args = p.parse_args()
 
     if args.min_hf:
@@ -930,7 +944,8 @@ def main() -> int:
     for region in regions:
         days = args.days if args.days is not None else REGIONS[region]["days"]
         db_path = region_db(region, args.out)
-        n, warns = run_region(region, bases, days, args.force, db_path)
+        n, warns = run_region(region, bases, days, args.force, db_path,
+                              point_workers=args.point_workers)
         all_warnings += warns
         print(f"\n[runs:{region}] total UPSERT {n:,} rows -> {db_path.name}")
     print(f"\n[collect_forecast] done in {(time.time()-t0)/60:.1f}m")

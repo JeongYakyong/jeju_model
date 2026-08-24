@@ -262,13 +262,20 @@ def hf_range_1h(base_utc: datetime, days: int, max_hf_map: dict[int, int]) -> li
 # forecast_horizon)이 **같은 스택**을 쓴다.  둘의 차이는 요청 변수 목록과 카테고리
 # 파생 함수뿐이라 그 둘만 인자로 받는다.
 NC_WORKERS = 8      # CLDFRA 와 같은 값 (std NC per-hf 병렬 안전 실측 2026-07-17)
+# 진행률을 몇 hf 마다 찍을지.  0 이면 끄고 지점 완료 줄만 낸다.
+# ★왜 필요한가: 한 지점이 120 hf 라 완료될 때까지 수 분간 아무것도 안 찍혔다.
+#   지점 병렬(point_workers>1)이면 세 지점이 같이 끝나므로 무음 구간이 더 길어진다.
+#   수집이 어디까지 갔는지·초당 몇 hf 인지 사람이 실시간으로 봐야 판단할 수 있다
+#   (2026-08-24: 커버리지 30%/0% 로 망가지는 걸 20분 넘게 아무도 몰랐다).
+NC_PROGRESS_EVERY = 20
 
 LONG_COLS = ["base_datetime", "point_name", "fcst_datetime", "category", "fcst_value"]
 
 
 def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
                   names: str, derive, max_hf_map: dict[int, int] | None = None,
-                  workers: int = NC_WORKERS, label: str = "KIMR-nc") -> pd.DataFrame:
+                  workers: int = NC_WORKERS, label: str = "KIMR-nc",
+                  point_workers: int = 1) -> pd.DataFrame:
     """(지점 × hf) std NC 호출 -> long 5컬럼 DataFrame.
 
     누적 변수(RAINC/RAINNC/ACSWDNB)의 diff 기준점을 위해 **hf=start-1 앵커**를 함께
@@ -280,6 +287,14 @@ def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
     5xx 백오프·키 회전을 하므로 여기서는 라운드만 더한다.  그래도 남으면 호출자가
     커버리지로 경고 -> 재실행 치유(COALESCE upsert 는 idempotent).
 
+    point_workers -- 지점 병렬 수.  동시성 = point_workers × workers.
+    호출자(collect_forecast)의 기본은 **3**(3 지점 동시, 사용자 결정 2026-08-24).
+    올릴수록 base 당 시간은 줄지만 KMA 가 막으면 **hf 가 조용히 빠진다** --
+    2026-06-16 에 동시성 18 이 504 를 유발했고, 2026-08-24 에 KIMG 를 3 으로
+    올렸을 때 커버리지 30%/0% 가 나왔다.  그래서 **판정은 수치로 한다**:
+    아래 "n/n시각" 로그와 `collect_forecast --verify` 가 온전한지 보고,
+    빠지면 2 나 1 로 내린다.
+
     derive : raw{변수명: 값} -> {카테고리: 값}.  소비처별 라벨 관례를 여기서 가른다.
     """
     hf_list = hf_range_1h(base_utc, days, max_hf_map or R030_MAX_HF)
@@ -290,7 +305,14 @@ def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
 
     rows: list[tuple] = []
     seen_names: set[str] = set()
-    for pt in points:
+
+    def _one_point(pt: dict) -> tuple[list[tuple], set[str], str]:
+        """한 지점의 전 hf -> (행, 본 변수명, 로그 한 줄).
+
+        지점 병렬일 때 각 스레드가 **자기 결과만** 만들고 호출자가 합친다 --
+        공유 리스트에 직접 쓰지 않으므로 락이 필요 없다.  pt 도 인자로 받는다
+        (루프 변수를 클로저로 잡으면 스레드끼리 같은 지점을 보게 된다).
+        """
         t0 = time.time()
 
         def one(hf: int) -> tuple[int, dict[str, float]]:
@@ -299,10 +321,18 @@ def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
             return hf, (parse_pt_std(body) if body else {})
 
         got: dict[int, dict[str, float]] = {}
+        done = 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for hf, raw in ex.map(one, hfs):
+                done += 1
                 if raw:
                     got[hf] = raw
+                if NC_PROGRESS_EVERY and (done % NC_PROGRESS_EVERY == 0
+                                          or done == len(hfs)):
+                    el = max(time.time() - t0, 1e-6)
+                    print(f"  {label}  {pt['name']:<22} {done}/{len(hfs)}hf "
+                          f"성공 {len(got)}  {el:.0f}s  {done / el:.1f}hf/s",
+                          flush=True)
         for rnd in range(2):
             missing = [h for h in hfs if h not in got]
             if not missing:
@@ -314,14 +344,27 @@ def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
                 if raw:
                     got[hf2] = raw
 
+        pt_rows: list[tuple] = []
+        pt_names: set[str] = set()
         for hf, raw in got.items():
-            seen_names |= set(raw)
+            pt_names |= set(raw)
             fcst = (base_utc + timedelta(hours=hf)).astimezone(KST).strftime(
                 "%Y-%m-%d %H:%M")
             for cat, val in derive(raw).items():
-                rows.append((base_dt_str, pt["name"], fcst, cat, float(val)))
-        print(f"  {label}  {pt['name']:<22} {len(got)}/{len(hfs)}시각 "
-              f"({time.time() - t0:.1f}s)")
+                pt_rows.append((base_dt_str, pt["name"], fcst, cat, float(val)))
+        return pt_rows, pt_names, (
+            f"  {label}  {pt['name']:<22} 완료 {len(got)}/{len(hfs)}시각 "
+            f"({time.time() - t0:.1f}s)")
+
+    if point_workers <= 1:
+        results = (_one_point(pt) for pt in points)
+    else:
+        with ThreadPoolExecutor(max_workers=point_workers) as ex:
+            results = list(ex.map(_one_point, points))
+    for pt_rows, pt_names, log_line in results:
+        rows += pt_rows
+        seen_names |= pt_names
+        print(log_line, flush=True)
 
     missing_names = sorted(set(names.split(",")) - seen_names)
     if missing_names:
@@ -365,11 +408,12 @@ def derive_met_ops_categories(raw: dict[str, float]) -> dict[str, float]:
 
 
 def fetch_kimr_met_long(points: list[dict], base_utc: datetime, days: int,
-                        workers: int = NC_WORKERS) -> pd.DataFrame:
+                        workers: int = NC_WORKERS,
+                        point_workers: int = 1) -> pd.DataFrame:
     """운영 met long (collect_forecast -> forecast_horizon).  구 GRIB 라벨로 낸다."""
     return fetch_nc_long(points, base_utc, days, NAME_MET_OPS,
                          derive_met_ops_categories, workers=workers,
-                         label="KIMR-met")
+                         label="KIMR-met", point_workers=point_workers)
 
 
 # ── KIMG 대체용 일사·운량 (KIMG 수집 실패 시 마지막 사다리) ──────────────────
