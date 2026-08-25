@@ -14,7 +14,27 @@ D+1 도 같은 스케일러로 다시 학습해야 해서(불일치 방지) 둘�
     (하이브리드 구성: SOLAR=PatchTST / WIND=LGBM).
   - **지평 D+1~D+5** (offset 0/24/48/72/96h). 운영 지평 5일·예보 수집 --days 5 와 일치.
     구 D+6·D+7 은 만들지 않는다.
-  - 학습창 train ≤2026-01 / val 2026-02~05 / test 2026-06~07 (demand·LGBM 과 동일 경계).
+  - (구) 학습창 train ≤2026-01 / val 2026-02~05 / test 2026-06~07
+
+2026-08-25 재학습 — 바뀐 것 둘
+================================================================================
+근거는 `../REPORT_cloud_feature_audit.md` (운량 피처 정밀 감사).
+  1. **`Year_sin`/`Year_cos` 를 solar 피처에 추가.**  구 구성은 solar 만 Hour 둘뿐이고
+     wind 엔 Year 가 있었다 — 대칭이 깨진 누락이다.  계절에 따라 운량-태양광 관계가
+     크게 다른데(실측 회귀 계수: 일사 겨울 0.238 vs 여름 0.094, 전운량 가을 -0.138 vs
+     여름 -0.045) 모델이 계절을 몰랐다.
+  2. **val 을 봄 4개월 → 2025년 1년(4계절)으로.**  구 분할은 early stopping·best-epoch·
+     ReduceLROnPlateau 가 전부 봄 val loss 로 결정돼 모델 선택이 계절에 치우쳤다.
+
+기대치 (LOMO·LGBM 대리모델, 7개월 평균 — PatchTST 실측 아님)
+  MAE 0.1181 → 0.1106,  맑은날(su>0.6) 편향 -0.0823 → -0.0734,  8월 -0.099 → -0.044.
+  ⚠**맑은날 과소예측이 이걸로 해결되지는 않는다.**  원인은 예보 운량의 정의 어긋남
+    (`tcld` 는 권운을 100% 반영, ASOS 전운량은 45%만)이고 입력 쪽 문제다.
+    실측 입력으로 돌리면 여름 맑음 편향이 이미 -0.031 이라 모델 쪽 여지가 좁다.
+
+서빙 영향: **없다.**  `serve_solarwind._build_solar_direct` 가 `patchtst._add_time_feats`
+로 Year_sin/cos 를 이미 만들고, `_infer` 는 `md['future_features_solar']` 로 열을 고르며,
+`num_features` 도 `len(md['features_solar'])` 에서 나온다 → 새 metadata·가중치만 넣으면 된다..
   - 입력 CSV 는 `export_solarwind_csv.py` 가 **메인 DB** 에서 뽑은 것을 쓴다.
 
 절대 바꾸면 안 되는 것 (서빙 호환)
@@ -108,10 +128,15 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 PRED_LEN = 24            # 한 번에 24h 예측
 
-# 학습창 (사용자 확정 2026-07-30 — demand 2-A / solarwind LGBM 과 같은 경계)
-TRAIN_END = '2026-01-31 23:00'
-VAL_END   = '2026-05-31 23:00'      # val = TRAIN_END 다음 ~ VAL_END
-TEST_END  = '2026-07-31 23:00'      # test = VAL_END 다음 ~ TEST_END
+# 학습창 (2026-08-25 재설계 — 구 경계는 val 이 봄 4개월뿐이라 모델 선택이 계절에 치우쳤다)
+#   구: train <=2026-01 / val 2026-02~05(봄만) / test 2026-06~07(여름만)
+#   → early stopping·best-epoch·ReduceLROnPlateau 가 전부 '봄' val loss 로 결정됐다.
+#     계절에 따라 su~운량 관계가 크게 다른데(실측 회귀: 일사 계수 겨울 0.238 vs 여름 0.094,
+#     전운량 계수 가을 -0.138 vs 여름 -0.045) 모델 선택이 한 계절만 봤다.
+#   신: val 을 1년(4계절)으로 잡는다.  데이터가 2020-01~ 6년 8개월치라 여유가 있다.
+TRAIN_END = '2024-12-31 23:00'      # train = 2020-01 ~ 2024-12 (5년, 여름 5회)
+VAL_END   = '2025-12-31 23:00'      # val   = 2025 전체 (4계절 — 모델 선택 기준)
+TEST_END  = None                    # test  = 2026-01 ~ 데이터 끝.  None = 끝까지 자동
 
 # ★ direct 지평: 이름 -> future/target 윈도우를 뒤로 미는 offset(시간).
 #   D+1 은 offset 0 (과거 윈도우 바로 다음 24h). offset 은 24의 배수여야 날짜 경계와 맞는다.
@@ -151,6 +176,11 @@ num_cols = df.select_dtypes(include='number').columns
 df[num_cols] = df[num_cols].interpolate(limit=3)
 df[num_cols] = df[num_cols].ffill().bfill()
 
+# TEST_END=None 이면 데이터 끝까지를 test 로 쓴다 (재수출할 때마다 날짜를 고칠 필요 없게).
+if TEST_END is None:
+    TEST_END = df.index.max().strftime('%Y-%m-%d %H:%M')
+    print('TEST_END 자동설정 ->', TEST_END)
+
 # 학습창이 데이터 안에 들어오는지 먼저 확인 (여기서 걸러야 학습 몇 시간 날리지 않는다)
 for name, bound in [('TRAIN_END', TRAIN_END), ('VAL_END', VAL_END), ('TEST_END', TEST_END)]:
     assert df.index.min() < pd.Timestamp(bound) <= df.index.max() + pd.Timedelta('1h'), \
@@ -159,6 +189,11 @@ n_tr = (df.index <= TRAIN_END).sum()
 n_va = ((df.index > TRAIN_END) & (df.index <= VAL_END)).sum()
 n_te = ((df.index > VAL_END) & (df.index <= TEST_END)).sum()
 print(f'train {n_tr}행 / val {n_va}행 / test {n_te}행')
+
+# ★val 이 4계절을 담는지 못 박는다 — 이번 재설계의 핵심이라 여기서 걸러야 한다.
+va_months = sorted(df[(df.index > TRAIN_END) & (df.index <= VAL_END)].index.month.unique())
+print('val 이 담은 월:', va_months)
+assert len(va_months) >= 12, f'val 이 4계절을 못 담는다 (월 {va_months}) — 계절 편향 재발'
 """)
 
 # ── 4. Solar 피처 + metadata 용 wind 피처 ─────────────────────────────────
@@ -180,7 +215,13 @@ future_features_solar = []
 for st in SOLAR_STATIONS:
     future_features_solar += [f'solar_rad_{st}', f'total_cloud_{st}',
                               f'midlow_cloud_{st}', f'solar_damping_{st}']
-future_features_solar += ['Hour_sin', 'Hour_cos']
+# ★Year_sin/cos 추가 (2026-08-25).  구 구성은 solar 만 Hour 둘뿐이고 wind 엔 Year 가
+#   있었다 — 대칭이 깨진 누락이다.  계절에 따라 운량-태양광 관계가 크게 달라지는데
+#   모델이 계절을 몰랐다.  실측 LOMO 검증(LGBM 대리, 7개월 평균):
+#     MAE 0.1181 -> 0.1106,  맑은날(su>0.6) 편향 -0.0823 -> -0.0734  (8월은 -0.099 -> -0.044)
+#   ⚠선형 모델에선 이득이 없다(절편만 움직인다).  비선형이라야 계절별 가중을 바꾼다.
+#   ⚠뒤에만 붙인다 — 이 순서가 곧 스케일러 열 순서이자 서빙 입력 순서다.
+future_features_solar += ['Hour_sin', 'Hour_cos', 'Year_sin', 'Year_cos']
 features_solar = future_features_solar + ['Solar_Utilization']
 print('solar future_features (%d):' % len(future_features_solar), future_features_solar)
 
@@ -452,7 +493,7 @@ metadata = {
     'solar_stations': SOLAR_STATIONS,
     'wind_stations':  WIND_STATIONS,
     # 이번 재학습 기록 (서빙은 안 읽지만 추적용)
-    'retrained': '2026-07-30 solar D+1~D+5 (wind 미학습 — LGBM 담당)',
+    'retrained': '2026-08-25 solar D+1~D+5 (+Year_sin/cos, val=4계절 재분할 / wind 미학습 — LGBM 담당)',
     'train': f'<={TRAIN_END}', 'val': f'~{VAL_END}', 'test': f'~{TEST_END}',
     'horizons_solar': HORIZONS,
 }
