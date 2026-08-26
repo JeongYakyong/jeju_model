@@ -270,11 +270,37 @@ def hz_label(h: int) -> str:
 
 
 def base_badge(base) -> str:
-    """발표 배지 — base 시각으로 '새벽 발표'(18z=03시) / '전일 밤 발표'(12z=21시) 구분."""
+    """발표 배지 — base 시각으로 '새벽 발표'(18z=03시) / '전일 밤 발표'(12z=21시) 구분.
+
+    발표 '주기'의 이름이다 (예측 검증 화면의 발표 필터 BASETIME_OPTS 와 같은 용어).
+    "언제 만든 예측인가"에는 답하지 못하므로 그 용도로는 base_stamp 를 쓴다.
+    """
     if base is None or (isinstance(base, float) and pd.isna(base)):
         return "—"
     b = pd.Timestamp(base)
     return "새벽 발표" if b.hour == 3 else "전일 밤 발표"
+
+
+def base_stamp(base, ref_day=None) -> str:
+    """발표 시각 표기 — '8/25 21시 발표 (어제)'.
+
+    base_badge 가 주기 이름만 주는 것과 달리 **언제 만든 예측인지**를 실제 시각으로 답한다.
+    ref_day(선택일)를 주면 그 날 기준 며칠 전 발표인지 괄호로 붙는다 — 같은 발표라도
+    익일 예측이면 '(어제)', 5일후 예측이면 '(5일 전)'이 되어 리드타임이 드러나고,
+    수집이 며칠 밀려 오래된 발표를 보고 있으면 그 자리에서 눈에 띈다.
+    (구 base_badge 표기는 지평과 무관하게 늘 '전일 밤 발표'라 이 둘을 구분하지 못했다.)
+    """
+    if base is None or (isinstance(base, float) and pd.isna(base)):
+        return "—"
+    b = pd.Timestamp(base)
+    stamp = f"{b.month}/{b.day} {b.hour}시 발표"
+    if ref_day is None:
+        return stamp
+    days_ahead = (pd.Timestamp(ref_day).normalize() - b.normalize()).days
+    if days_ahead < 0:          # 발표보다 이전 날짜 — 경과를 말할 수 없다
+        return stamp
+    ago = {0: "오늘", 1: "어제"}.get(days_ahead, f"{days_ahead}일 전")
+    return f"{stamp} ({ago})"
 
 
 @st.cache_data(ttl=CACHE_TTL)

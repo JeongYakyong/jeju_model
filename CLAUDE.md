@@ -87,7 +87,7 @@ collectors/  ──▶  data/input_data_jeju.db  ──▶  forecasting/  ──
 |---|---|---|
 | 경로 | `project_paths.py` | 모든 DB·모델·스크립트 경로. 폴더 구조 변경 시 유일 수정처 |
 | 파이프라인 단계 | `run_pipeline.py` `PIPELINE_STEPS` | cron 과 관리자 화면(`page_main.render_admin`)이 **같은 리스트를 import** — 단계 추가/변경은 여기 한 곳 |
-| 화면 용어 | `pages/common.py` `hz_label` / `base_badge` | 지평·발표 라벨 |
+| 화면 용어 | `pages/common.py` `hz_label` / `base_badge` / `base_stamp` | 지평·발표 라벨 |
 
 각 스크립트는 상단 3줄로 루트를 `sys.path` 에 넣고 `import project_paths as P` 한다.
 
@@ -185,8 +185,14 @@ import 되면 서빙 부품이다 — 학습 전용으로 오인해 옮기거나
 
 ## 규약·함정
 
-- **화면에 `D+N` 표기 금지** (사용자 확정). 지평은 당일/익일/모레/N일후(`common.hz_label`),
-  발표는 "새벽 발표"(18z)/"전일 밤 발표"(12z) 배지(`common.base_badge`).
+- **화면에 `D+N` 표기 금지** (사용자 확정). 지평은 당일/익일/모레/N일후(`common.hz_label`).
+  발표는 **묻는 게 다르면 함수도 다르다** (2026-08-26 정정):
+  - "언제 만든 예측인가" = **`common.base_stamp`** → `8/25 21시 발표 (어제)`.
+    실제 시각 + 선택일 기준 경과. 종합 화면의 지도 패널 부제가 쓴다.
+  - "어느 발표 주기인가" = `common.base_badge` → "새벽 발표"(18z)/"전일 밤 발표"(12z).
+    예측 검증 화면의 발표 필터(`page_main.BASETIME_OPTS`)와 짝을 이루는 **범주 이름**이다.
+  - ⚠ `base_badge` 를 신선도 표기에 쓰면 안 된다 — 지평과 무관하게 늘 "전일 밤 발표"가
+    나와서 5일후 예측도, 수집이 3일 밀린 예측도 똑같아 보인다(2026-08-26 실측 확인).
   내부 코드·DB 컬럼은 `horizon_d` 정수 유지.
 - **운영 지평 = 5일** (`pages/common.py` `JEJU_HZ_MAX = 5`, `serve_chain.HZ = 1..5`, 수집 `--days 5`).
   아카이브에 남은 과거 D+6~7 행은 UI 에서만 클램프로 제외.

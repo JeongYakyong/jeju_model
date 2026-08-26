@@ -313,10 +313,11 @@ def conf_of(dplus: int) -> tuple[str, str]:
 
 
 def _issue_badge(date: str, dplus: int) -> str:
-    """부제·툴팁용 발표 배지 — 화면 D+N 금지 방침(2026-07-17 용어 체계).
+    """부제·툴팁용 발표 표기 — 화면 D+N 금지 방침(2026-07-17 용어 체계).
 
-    예보 뷰는 그 날 09–15시 구간을 실제로 채운 최신 발표(base)로
-    '새벽 발표'(18z)/'전일 밤 발표'(12z)를 구분, 과거 뷰는 '실측 관측'.
+    예보 뷰는 그 날 09–15시 구간을 실제로 채운 최신 발표(base)를 '8/25 21시 발표 (어제)'
+    처럼 실제 시각 + 선택일 기준 경과로 적고, 과거 뷰는 '실측 관측'.
+    구 표기('전일 밤 발표')는 5일후를 봐도 똑같이 나와 언제 만든 예측인지 알 수 없었다.
     """
     if dplus < 0:
         return "실측 관측"
@@ -324,7 +325,7 @@ def _issue_badge(date: str, dplus: int) -> str:
                          "WHERE timestamp BETWEEN ? AND ?",
                  (f"{date} {HOURS[0]}", f"{date} {HOURS[1]}"))
     b = None if df.empty else df.loc[0, "b"]
-    return "예보 없음" if (b is None or pd.isna(b)) else C.base_badge(b)
+    return "예보 없음" if (b is None or pd.isna(b)) else C.base_stamp(b, date)
 
 
 # 단색 강도맵 상수 — 투명도 상한 40% → opacity ≤ 0.60

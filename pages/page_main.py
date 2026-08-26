@@ -94,10 +94,11 @@ def render_home():
               _when(smp["timestamp"], smp["est_smp"], "min"), delta_color="off")
     m4.metric("SMP 음수가격 경보", f"{danger_hours} 시간",
               "48시간 창 기준", delta_color="off")
-    # 선택일 구간의 대표 발표 배지 — 시각별 최신 발표본이라 하루 안에서도 섞일 수 있어 최빈값.
-    day_bases = df.loc[df["timestamp"].dt.normalize() == day.normalize(), "base"].dropna()
-    badge = f" · 선택일 예보 = **{C.base_badge(day_bases.mode().iloc[0])}**" if len(day_bases) else ""
-    st.caption(f"선택일부터 48시간 창 · 예측 = 목표시각마다 가장 최근 발표본{badge}")
+    # 캡션 제거 (사용자 결정 2026-08-26) — 문구가 어렵고, 발표 시각은 위 지도 패널 부제가
+    # '8/25 21시 발표 (어제)'로 이미 답한다.  되살릴 일이 있을까 봐 남겨 둔다.
+    # day_bases = df.loc[df["timestamp"].dt.normalize() == day.normalize(), "base"].dropna()
+    # badge = f" · 선택일 예보 = **{C.base_badge(day_bases.mode().iloc[0])}**" if len(day_bases) else ""
+    # st.caption(f"선택일부터 48시간 창 · 예측 = 목표시각마다 가장 최근 발표본{badge}")
 
 
 # =============================================================================
