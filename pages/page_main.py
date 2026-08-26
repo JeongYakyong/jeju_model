@@ -287,14 +287,14 @@ def _period_control(prefix: str):
     return (TODAY - pd.Timedelta(days=mode)).strftime("%Y-%m-%d"), None
 
 
-BASETIME_OPTS = {"전일 밤 발표": C.BASE_HOUR_12Z, "새벽 발표(당일예보)": C.BASE_HOUR_18Z}
+BASETIME_OPTS = {"전일 밤 예측": C.BASE_HOUR_12Z, "새벽 예측(당일예보)": C.BASE_HOUR_18Z}
 
 
 def _basetime_control(prefix: str) -> tuple[str, str]:
     """발표(basetime) 필터 → (base_hour, 라벨).  12z/18z 검증을 분리해서 본다 —
     두 발표를 섞으면 같은 지평에 서로 다른 리드타임이 합산된다 (2026-07-18 이원화)."""
-    sel = st.segmented_control("발표", list(BASETIME_OPTS), default="전일 밤 발표",
-                               key=f"{prefix}_bh") or "전일 밤 발표"
+    sel = st.segmented_control("예측", list(BASETIME_OPTS), default="전일 밤 예측",
+                               key=f"{prefix}_bh") or "전일 밤 예측"
     return BASETIME_OPTS[sel], sel
 
 
