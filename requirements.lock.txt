@@ -1,0 +1,43 @@
+# 서버 배포용 버전 고정 목록 (2026-08-26, 로컬 검증 환경 그대로)
+# ─────────────────────────────────────────────────────────────────────
+# requirements.txt 는 하한선(>=)만 있어서 설치 시점에 따라 다른 버전이 깔린다.
+# 그런데 models/ 의 pickle 번들은 라이브러리 클래스를 통째로 담고 있다:
+#   smp_binary.pkl   → lightgbm.sklearn.LGBMClassifier
+#   smp_d2_da.pkl    → lightgbm.sklearn.LGBMRegressor
+#   MinMax_scaler_*  → sklearn.preprocessing.MinMaxScaler
+# lightgbm·scikit-learn 버전이 어긋나면 경고만 뜨고 넘어가거나, 최악의 경우
+# unpickle 자체가 실패해 SMP·태양광 서빙이 죽는다.  그래서 배포는 이 파일로 한다.
+#
+#   ★ torch 는 반드시 CPU 휠을 먼저 깔 것 (안 그러면 CUDA 2~3GB 를 끌고 온다):
+#       pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+#       pip install -r requirements.lock.txt
+#
+# 재학습으로 모델을 새로 굽거나 라이브러리를 올릴 때는 이 파일도 함께 갱신한다.
+# ─────────────────────────────────────────────────────────────────────
+
+# ── 모델 로딩에 직결 (버전 어긋나면 조용히 틀리거나 죽는다) ──
+lightgbm==4.6.0
+scikit-learn==1.6.1
+joblib==1.4.2
+torch==2.10.0
+numpy==1.26.4
+
+# ── 데이터 처리 ──
+pandas==2.2.2
+pyarrow==16.1.0
+
+# ── 화면 ──
+streamlit==1.58.0
+plotly==5.24.1
+
+# ── 도메인 계산 ──
+pvlib==0.15.0
+holidays==0.96
+
+# ── 수집 ──
+requests==2.32.3
+urllib3==2.7.0
+python-dotenv==0.21.0
+
+# ── AI 브리핑 (선택) ──
+google-genai==1.70.0
