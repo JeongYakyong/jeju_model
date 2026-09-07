@@ -6,6 +6,8 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 .auth_token
+# 사이트 접속 잠금 설정(on/off + 비밀번호 해시) — 서버마다 다르고 비밀을 담는다
+site_lock.json
 
 # ─────────────────────────────────────────────────────────────────────
 # git 이 추적하는 것 = 서버가 `git pull` 한 번으로 받는 것

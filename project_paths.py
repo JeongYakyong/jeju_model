@@ -57,4 +57,4 @@ FIT_SOLAR_SCALE    = os.path.join(DIR_FORECASTING, 'fit_solar_scale.py')       #
 
 # ── 인증·환경 ────────────────────────────────────────────────────────────
 ENV_FILE   = os.path.join(ROOT, '.env')          # API 키 (수집기 dotenv 는 상위 폴더 탐색으로 이 파일을 찾는다)
-AUTH_TOKEN = os.path.join(ROOT, '.auth_token')   # streamlit 비밀번호 게이트 6시간 토큰
+SITE_LOCK  = os.path.join(ROOT, 'site_lock.json')  # 사이트 접속 잠금 설정 (pages/site_lock.py, git 제외)

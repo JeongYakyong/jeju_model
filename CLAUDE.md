@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 명령
 
 ```bash
-streamlit run app.py                      # 대시보드 (비밀번호 게이트 → .streamlit/secrets.toml 의 password)
+streamlit run app.py                      # 대시보드 (사이트 접속 잠금 → site_lock.json, 관리자 메뉴에서 on/off)
 
 python run_pipeline.py                    # 12z 풀: 실측→예보→KIM 아카이브→체인→SMP (cron 00:20 KST)
 python run_pipeline.py --steps light18    # 18z 당일예보 라이트 (cron 08:00 KST)
@@ -159,7 +159,8 @@ collectors/ 는 **9개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙
 
 `app.py`(게이트 + 내비) → `pages/page_main.py`(5메뉴: 종합/예측 확인/예측 검증/데이터 현황/관리자)
 → `pages/common.py`(조회·정확도·차트 헬퍼) → `pages/weather_map_jeju.py`(3구역 지도) ·
-`chart_warn.py`(위험구간 밴드) · `brief_jeju.py`·`brief_store.py`(Gemini 브리핑).
+`chart_warn.py`(위험구간 밴드) · `brief_jeju.py`·`brief_store.py`(Gemini 브리핑) ·
+`site_lock.py`(사이트 접속 잠금).
 
 - **`pages/` 안에서 서로 부를 때는 반드시 패키지 import**: `from pages import common as C`.
   Streamlit 이 페이지를 *스크립트로* 실행해 `sys.path[0]` 이 저장소 루트라, bare
@@ -173,6 +174,18 @@ collectors/ 는 **9개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙
   CSS 토큰·plotly 템플릿·`common.COLOR` 팔레트·지도 타일을 일괄 교체한다. 차트 색을
   손대려면 `_CHART_PALETTES` 를 고치고 dataviz 검증(CVD·명도)을 다시 통과시켜야 한다.
 - 관리자 메뉴는 `OPS_PASSWORD`(.env) 게이트 — `common.ops_gate()` 를 함수 첫 줄에서 호출.
+- **잠금은 목적이 다른 두 개다 — 섞지 말 것** (2026-09-07):
+  - `common.ops_gate()` = 들어온 사람이 **실행 버튼**을 못 누르게. 비밀번호는 `.env` 의 `OPS_PASSWORD`.
+  - `site_lock.gate()` = 사이트에 **들어오는 것 자체**를 막는다. `app.py` 최상단에서 부르고,
+    켜기/끄기·비밀번호는 관리자 메뉴 → `site_lock.json`(git 제외, PBKDF2 해시). 해제는 세션 단위.
+    비밀번호가 없으면 `enabled` 가 켜져 있어도 잠그지 않는다(손편집 락아웃 방지).
+    ⚠ 옛 `secrets.toml` password + `.auth_token` 6시간 파일토큰 게이트를 **대체**했다 —
+    토큰이 서버 파일이라 한 사람이 풀면 다른 브라우저·다른 사람도 통과되던 구조였다.
+- **지도 배경 타일(CARTO)에는 API 키가 필요하다** — `CARTO_API_KEY` 환경변수를
+  `weather_map_jeju._carto_tile_qs()` 가 **호출 시점에** 읽어 타일 URL 뒤에 붙인다.
+  키가 없으면 지도 위에 "API KEY REQUIRED" 워터마크가 찍힌다(무료 발급:
+  https://carto.com/basemaps/apikey/). ⚠ 모듈 최상단에서 `os.getenv` 로 읽으면
+  `load_dotenv()` 보다 먼저 도는 실행 경로에서 빈 값이 굳어 영영 안 먹는다 — 호출 시점 유지.
 
 ### forecasting/ 의 `smp_features`·`smp_binary`·`smp_da` 는 학습·서빙 공용이다
 
@@ -285,7 +298,7 @@ import 되면 서빙 부품이다 — 학습 전용으로 오인해 옮기거나
   - **추적**: `models/`(~96MB) — 가중치·메타·보정표는 **한 세트**라 통째로 넣는다.
     따로 옮기다 스케일러 하나가 어긋나면 조용히 틀린다. `data/refdata/`(외부 입력).
   - **제외**: `*.db`(서버가 자체 수집) · `logs/` · `Training/` 대용량 산출물(~233MB,
-    재학습으로 재생성) · `.env` · `.auth_token`.
+    재학습으로 재생성) · `.env` · `.auth_token` · `site_lock.json`(사이트 잠금 설정).
   - ⚠ 모델이 git 에 들어가므로 **재학습 때마다 수십 MB 가 새로 쌓인다**(바이너리라 델타
     압축이 거의 안 먹는다). 재학습이 잦아지면 Git LFS 로 옮길 것.
 

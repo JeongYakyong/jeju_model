@@ -14,10 +14,14 @@
   실측 모드는 '관측 없음' 폴백.
 - 라이트/다크 테마 겸용 — build_html 이 활성 테마(common.theme_type)에 맞춰 타일(CARTO
   light_all/dark_all)·패널 토큰을 주입한다.
+- CARTO 타일은 API 키가 필요하다(_carto_tile_qs). 환경변수 CARTO_API_KEY 미설정 시
+  지도 위에 'API KEY REQUIRED' 워터마크가 찍힌다.
 """
 from pathlib import Path
 import json
+import os
 import sys
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -338,6 +342,24 @@ def _issue_badge(date: str, dplus: int) -> str:
 GREEN = "#059669"
 OP_MIN, OP_MAX = 0.06, 0.60
 
+# CARTO 무료 배경 타일 API 키 — 2026년부터 무인증 요청이 막혀, 키 없이 부르면 타일 대신
+# "API KEY REQUIRED" 글자가 찍힌 이미지가 온다.  https://carto.com/basemaps/apikey/ 에서
+# 무료 발급(월 500만 타일)받아 환경변수 CARTO_API_KEY 에 넣는다.  키가 없으면 예전처럼
+# 그냥 붙이지 않는다 — 지도는 뜨되 워터마크가 보인다.
+_CARTO_KEY_PARAM = "key"   # CARTO 문서가 api_key 로 바뀌면 이 한 줄만 고친다
+
+
+def _carto_tile_qs() -> str:
+    """타일 URL 뒤에 붙일 쿼리스트링. 키가 없으면 빈 문자열.
+
+    ★ 반드시 **호출 시점**에 os.getenv 한다 — 모듈 최상단에서 읽으면 load_dotenv() 가
+    나중에 도는 실행 경로에서 빈 값이 그대로 굳어, .env 에 키를 넣어도 영영 안 먹는다
+    (재시작해도 import 순서는 그대로라 증상이 안 사라진다).
+    """
+    key = os.getenv("CARTO_API_KEY", "").strip()
+    return f"?{_CARTO_KEY_PARAM}={quote(key, safe='')}" if key else ""
+
+
 # 테마 토큰 — build_html 이 활성 테마에 맞춰 템플릿에 주입 (좌우 패널·타일·경계선 색)
 _MAP_THEMES = {
     "light": dict(TILES="light_all", MAPBG="#e8edf2", PANEL="#ffffff", INK="#0f172a",
@@ -529,7 +551,7 @@ const LEGEND = {
 
 const map = L.map("map", {zoomControl:false, scrollWheelZoom:false, zoomSnap:0.25, zoomDelta:0.5});
 L.control.zoom({position:'bottomright'}).addTo(map);
-L.tileLayer("https://{s}.basemaps.cartocdn.com/__TILES__/{z}/{x}/{y}{r}.png",{
+L.tileLayer("https://{s}.basemaps.cartocdn.com/__TILES__/{z}/{x}/{y}{r}.png__TILE_QS__",{
   subdomains:"abcd", maxZoom:18, attribution:"&copy; OpenStreetMap &copy; CARTO"}).addTo(map);
 const STROKE = "__STROKE__", HOVER = "__HOVER__", NODATA = "__NODATA__";
 
@@ -811,7 +833,8 @@ def build_html(day: pd.Timestamp, dplus: int, zones: dict, util: dict,
                   ("__NETLOAD_PANEL__", _netload_panel_html(netload)),
                   ("__UTIL_CARDS__", _util_cards_html(util, util_act)),
                   ("__WX_STATS__", _wx_stats_html(tmax, tmin, humidity)),
-                  ("__ACTIVE_TEXT__", active_text)]
+                  ("__ACTIVE_TEXT__", active_text),
+                  ("__TILE_QS__", _carto_tile_qs())]
                  + [(f"__{key}__", value) for key, value in theme.items()]):
         html = html.replace(k, v)
     return html

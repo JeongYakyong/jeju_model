@@ -589,6 +589,12 @@ def render_admin():
             if rc == 0:
                 st.cache_data.clear()
 
+    # 사이트 접속 잠금 — 관리자메뉴 잠금(ops_gate)과 목적이 다른 별개 기능이다.
+    # ops_gate = 들어온 사람의 '실행 버튼'을 막고, 이쪽 = 사이트에 '들어오는 것'을 막는다.
+    with st.expander("사이트 접속 잠금 — 켜기/끄기 · 비밀번호"):
+        from pages import site_lock
+        site_lock.render_admin_section()
+
     # 브리핑 수동 생성 — 종합 메뉴와 같은 로직(Gemini → ai_briefings.db)
     with st.expander("AI 브리핑 수동 생성"):
         from pages import brief_jeju

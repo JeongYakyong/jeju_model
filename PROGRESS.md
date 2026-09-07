@@ -1,7 +1,7 @@
 # PROGRESS
 
 > 스냅샷 (일지 아님). 상세 로그는 `jejumodel.md`, 결정 목록은 `DECISIONS.md`.
-> 최종 갱신 2026-08-25
+> 최종 갱신 2026-09-07
 
 ## 다음 세션: **서버 배포** (사용자 확정)
 
@@ -18,7 +18,14 @@ python forecasting/serve_chain.py --utc 12 --no-write # 120행 hd 1~5, rc=0
 AppTest.from_file('pages/page_main.py')              # exception 0 / error 0
 ```
 
-⚠**아직 `git push` 안 했다** — 새 리포트 2개 + 노트북·생성기 변경분이 로컬에만 있다.
+⚠**아직 `git push` 안 했다** — 새 리포트 2개 + 노트북·생성기 변경분 + 09-07 화면 변경분이 로컬에만 있다.
+
+**배포 시 서버에서 따로 해 줄 것** (git 이 안 옮겨 주는 것들):
+1. `CARTO_API_KEY` — https://carto.com/basemaps/apikey/ 무료 발급 후 systemd
+   `[Service]` 에 `Environment=CARTO_API_KEY=...` (권장) 또는 `.env`.
+   안 넣으면 지도에 "API KEY REQUIRED" 워터마크가 뜬다.
+2. `site_lock.json` — .gitignore 대상이라 서버에 없다. 첫 실행 때 서버의
+   `.streamlit/secrets.toml` password 로 자동 시드되며, 이후 관리자 메뉴에서 켜기/끄기.
 
 ## 현재 상태
 
@@ -39,12 +46,18 @@ AppTest.from_file('pages/page_main.py')              # exception 0 / error 0
 - ★**개선 시도 전수 실패 기록** (같은 리포트 §10) — 피처 재조합 / 후처리 추가 /
   실측 재학습(Year+split) / 예보 축 학습 / `lwdown`·`temp`·`reh` 추가. **전부 실패.**
 - ★**예보 품질이 천장** — 같은 모델에 입력만 바꿔 MAE 실측 0.0764 vs 예보 0.1125(**+47%**).
+- **사이트 접속 잠금** (`pages/site_lock.py`, 09-07) — 진입점 게이트 + 관리자 메뉴 on/off.
+  설정은 `site_lock.json`(git 제외, PBKDF2 해시), 해제는 세션 단위.
+  옛 `secrets.toml`+`.auth_token` 6시간 토큰 게이트를 대체했다. AppTest 8건 통과.
+- **CARTO 타일 API 키 주입** (09-07) — `CARTO_API_KEY` 를 **호출 시점에** 읽어 `?key=` 로 붙인다.
+  모듈 최상단에서 읽으면 `load_dotenv()` 순서에 따라 빈 값이 굳는다.
 - **재학습 코드는 완성돼 있다** (`_gen_notebook_solar_d1d5.py`) — 결과가 나빠 되돌렸을 뿐
   코드·dry-run·서빙 무수정 확인은 끝났다. 재시도 시 그대로 쓸 수 있다.
 
 ## 다음 할 일
 
 1. ★**서버 배포** — `git push` → 서버 `git pull` → cron 확인.
+   배포 후 **CARTO 키 주입**(위 배포 체크리스트)과 사이트 잠금 동작 확인.
 2. **아카이브 축적 유지** — `forecast_kimg` 층별·`lwdown` 이 유일한 미래 지렛대.
    **재시도 조건: 18개월 축적(2027-08경).**
 3. **8월 스케일링 재판정** — `fit_solar_scale.py --check` 로 흐림 편향 **부호** 확인.

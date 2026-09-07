@@ -13,7 +13,7 @@
 
 ```
 jeju_model\
-├─ app.py               # Streamlit 진입점 — 비밀번호 게이트(6h 토큰) + 내비게이션
+├─ app.py               # Streamlit 진입점 — 사이트 접속 잠금 게이트 + 내비게이션
 ├─ project_paths.py     # 모든 경로의 단일 진실원 (폴더 바꾸면 여기만 수정)
 ├─ run_pipeline.py      # 수집→예측 단일 진입점 (cron·관리자 원클릭 공용)
 │
@@ -22,7 +22,8 @@ jeju_model\
 │   ├─ common.py            # 공용 레이어 — DB 조회·비교 프레임·정확도·차트/UI 헬퍼
 │   ├─ weather_map_jeju.py  # 제주 3구역 기상 지도 (Leaflet)
 │   ├─ chart_warn.py        # 위험구간 음영 밴드
-│   └─ brief_jeju.py  brief_store.py   # Gemini 브리핑 + 저장소
+│   ├─ brief_jeju.py  brief_store.py   # Gemini 브리핑 + 저장소
+│   └─ site_lock.py         # 사이트 접속 잠금 (게이트 + 관리자 설정 UI)
 │
 ├─ collectors\          # 10개 — 진입점 collect_historical / collect_forecast / collect_archive
 │                       #   예보 fetch kma_kimg · kma_kimr_nc(KIMR 유일 경로) / 실측 kpx_asos
@@ -61,7 +62,7 @@ jeju_model\
 
 | 원본 (Model_api_added) | 신규 |
 |---|---|
-| `app.py` 비밀번호 게이트 | `app.py` (토큰 = 루트 `.auth_token`) |
+| `app.py` 비밀번호 게이트 | `pages/site_lock.py` (설정 = 루트 `site_lock.json`, 2026-09-07 교체) |
 | `utils/chart_helpers.py` 경고 밴드 | `pages/chart_warn.py` (est_net_demand → est_net_load_jeju) |
 | `utils/gemini.py` | `pages/brief_jeju.py` (저장 JSON → SQLite, SMP 경보 리스크 추가) |
 
@@ -71,8 +72,10 @@ jeju_model\
 python -m venv venv && venv/bin/pip install -r requirements.txt   # (Windows: venv\Scripts\pip)
 ```
 
-1. `.env` — API 키 (`KMA_API_KEY`, `KPX_API_KEY`, `GEMINI_API_KEY`, 선택 `OPS_PASSWORD`)
-2. `.streamlit/secrets.toml` — `password = "..."` (화면 접속 비밀번호)
+1. `.env` — API 키 (`KMA_API_KEY`, `KPX_API_KEY`, `GEMINI_API_KEY`, `CARTO_API_KEY`,
+   선택 `OPS_PASSWORD`).  견본은 `.env.example`
+2. `.streamlit/secrets.toml` — `password = "..."`.  사이트 접속 잠금의 **최초 시드**로만
+   쓰인다(첫 실행 때 `site_lock.json` 이 이 비밀번호를 물려받는다). 이후 변경은 관리자 메뉴에서
 3. 실행:
 
 ```bash
@@ -124,6 +127,25 @@ python run_pipeline.py --steps predict    # 예측만
 - **관리자** — 원클릭 전체 실행 · 개별/고급 실행 · 브리핑 수동 생성 (OPS_PASSWORD 게이트)
 
 ## 운영 노트
+
+- **사이트 접속 잠금 (2026-09-07 도입, 기존 게이트 대체)** — `pages/site_lock.py`.
+  진입점 `app.py` 최상단에서 `site_lock.gate()` 가 잠기면 어떤 메뉴도 그리지 않는다.
+  켜기/끄기·비밀번호 변경은 **관리자 메뉴 → "사이트 접속 잠금"**, 설정은 루트
+  `site_lock.json`(**.gitignore 대상** — `git pull` 배포·서버 재시작에도 유지).
+  비밀번호는 PBKDF2-HMAC-SHA256 해시로 저장하고, 빈칸으로 저장하면 기존 비밀번호를 유지한다.
+  해제는 **세션 단위**(브라우저마다 따로). 비밀번호를 잊으면 `site_lock.json` 의
+  `"enabled"` 를 `false` 로 고쳐 열고 관리자 메뉴에서 다시 지정한다.
+  옛 방식(`secrets.toml` password + `.auth_token` 6시간 파일토큰)은 토큰이 서버 파일이라
+  한 사람이 풀면 다른 브라우저·다른 사람도 6시간 통과되던 구조여서 걷어냈다.
+  관리자메뉴 잠금(`common.ops_gate`, `OPS_PASSWORD`)과는 **별개 기능**이다.
+- **지도 타일 CARTO API 키 (2026-09-07)** — CARTO 가 `basemaps.cartocdn.com` 무인증 요청을
+  막아서, 키 없이 부르면 타일 대신 "API KEY REQUIRED" 워터마크 이미지가 온다.
+  https://carto.com/basemaps/apikey/ 에서 무료 발급(월 500만 타일) → 환경변수
+  `CARTO_API_KEY`. `weather_map_jeju._carto_tile_qs()` 가 **호출 시점에** 읽어
+  `?key=` 로 붙인다(모듈 최상단에서 읽으면 `load_dotenv()` 순서에 따라 빈 값이 굳는다).
+  systemd 서버는 `.env` 보다 서비스 파일 `[Service]` 의 `Environment=CARTO_API_KEY=...`
+  한 줄이 확실하다 — OS 가 파이썬을 띄우기 전에 심으므로 import 순서와 무관하다.
+  (`sudo systemctl daemon-reload` + `sudo systemctl restart <서비스>` 필요)
 
 - **예측 지평 = 5일** (2026-07-17 확정, 기존 7일 축소). 수집도 `--days 5` — KIMR 이 5일까지
   1h 전량 커버한다. **KIMG 는 서빙 입력 유지용**: 서빙 운량·일사(total/midlow_cloud_*,

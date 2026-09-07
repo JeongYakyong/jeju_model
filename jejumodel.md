@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-09-07 — 사이트 접속 잠금 + CARTO 타일 API 키
+
+### 사용자 결정 사항 (재질문 금지)
+- **새 사이트 잠금이 기존 게이트를 대체한다** — `app.py` 의 `secrets.toml` password +
+  `.auth_token` 6시간 파일토큰 방식을 걷어냈다. 잠금을 두 겹으로 쌓지 않는다.
+- 해제는 **세션(브라우저) 단위**. 옛 6시간 파일토큰은 서버 파일이라 한 사람이 풀면
+  다른 브라우저·다른 사람도 통과되던 구조여서 버렸다.
+- **CARTO API 키 발급은 사용자가 직접 한다** (회원가입 필요).
+
+### 사이트 접속 잠금 — `pages/site_lock.py` (신규)
+`app.py` 최상단 `site_lock.gate()` → 잠기면 어떤 메뉴도 안 그려진다.
+켜기/끄기·비밀번호는 **관리자 메뉴 → "사이트 접속 잠금"** 확장 패널.
+
+- 설정 = 루트 `site_lock.json` (**.gitignore 대상** → `git pull` 배포·서버 재시작에도 유지).
+- 비밀번호는 **PBKDF2-HMAC-SHA256(200k) 해시** — 파일을 열어도 평문이 안 보인다.
+  잊었을 때 복구는 `"enabled": false` 로 손편집 → 관리자 메뉴에서 재지정.
+- **첫 실행 시 `secrets.toml` 의 password 로 자동 시드** → 전환 뒤에도 쓰던 비밀번호 그대로.
+- ★**비밀번호가 없으면 `enabled` 가 켜져 있어도 잠그지 않는다**(`is_locked`) — JSON 을
+  손으로 고쳐 `enabled` 만 켜 두면 아무도 못 들어오는 락아웃이 나므로 구조적으로 막았다.
+  깨진 JSON 도 같은 이유로 '열림'으로 본다.
+- 빈칸 저장 = 기존 비밀번호 유지 / 확인란 불일치·미설정 상태로 켜기 = 차단.
+- 관리자메뉴 잠금(`common.ops_gate`, `OPS_PASSWORD`)과는 **별개 기능**이다.
+
+검증(AppTest 실렌더 + 유닛): 시드→잠김·메뉴 미노출 / 옛 비밀번호 통과 / 오답 차단 /
+끄면 즉시 본문 / 빈칸 저장 시 해시 불변 / 미설정 상태 켜기 차단 / 불일치 차단 /
+새 비밀번호+켜기 후 본인 세션 유지 — **8건 전부 통과**.
+
+### CARTO 타일 — `?key=` 주입
+CARTO 가 `basemaps.cartocdn.com` 무인증 요청을 막아, 키 없이 부르면 타일 대신
+**"API KEY REQUIRED" 워터마크 이미지**가 온다. 무료 발급(월 500만): https://carto.com/basemaps/apikey/
+
+- `weather_map_jeju._carto_tile_qs()` 가 `CARTO_API_KEY` 를 **호출 시점에** `os.getenv` 해
+  `?key=<urlencoded>` 로 붙인다. 키 없으면 빈 문자열(지금과 동일 URL).
+- ★**모듈 최상단에서 읽으면 안 된다** — `load_dotenv()` 가 나중에 도는 실행 경로에서
+  빈 값이 그대로 굳어 `.env` 에 키를 넣어도 영영 안 먹는다(재시작해도 import 순서는 그대로).
+  현 구조는 `pages/common.py:28` 의 `load_dotenv(P.ENV_FILE)` 가 먼저 돌긴 하지만,
+  순서에 의존하지 않도록 호출 시점 읽기로 고정했다.
+- 파라미터 이름은 `_CARTO_KEY_PARAM = "key"` 한 줄 — CARTO 문서가 `api_key` 로 쓰면 여기만 고친다.
+- **서버 권장: `.env` 대신 systemd `[Service]` 의 `Environment=CARTO_API_KEY=...`**
+  (OS 가 파이썬을 띄우기 전에 심으므로 import 순서와 무관) →
+  `sudo systemctl daemon-reload` + `sudo systemctl restart <서비스>`.
+
+### 이월
+- **CARTO 키 발급 후 `.env` 또는 systemd 에 넣기** — 넣기 전까지 지도에 워터마크가 남는다.
+- `.auth_token` 은 이제 아무도 안 읽는다(파일은 그대로 뒀다).
+
+---
+
 ## 2026-08-25 — 운량 피처 정밀 감사 + 태양광 재학습 코드
 
 ### 사용자 결정 사항 (재질문 금지)

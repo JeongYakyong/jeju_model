@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-"""jeju_model 진입점 — 비밀번호 게이트(6시간 토큰) + 페이지 내비게이션.
+"""jeju_model 진입점 — 사이트 접속 잠금 게이트 + 페이지 내비게이션.
 
 torch 등 무거운 import 금지 — 추론·수집은 전부 subprocess 로 돈다(관리자 메뉴·run_pipeline.py).
-게이트는 Model_api_added app.py 의 check_password/_token_valid/_write_token 이식:
-비밀번호는 .streamlit/secrets.toml 의 password, 성공 시 파일 토큰(P.AUTH_TOKEN)을 남겨
-6시간 동안은 새로고침·재접속해도 다시 묻지 않는다.
+게이트 로직은 pages/site_lock.py 한 곳에 있다 — 켜기/끄기와 비밀번호는 관리자 메뉴에서
+바꾸고 site_lock.json(git 제외)에 저장된다. 해제는 세션(브라우저) 단위.
+(2026-09-07: secrets.toml 비밀번호 + .auth_token 6시간 파일토큰 방식을 대체.
+ 옛 방식은 토큰이 서버 파일이라 한 사람이 풀면 다른 브라우저·다른 사람도 6시간 통과됐다.)
 """
-import os
 import sys
-import time
 from pathlib import Path
 
 import streamlit as st
@@ -16,51 +15,14 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-import project_paths as P   # 저장소 안의 모든 경로는 여기 한곳에 모아 둔다
 from pages import common as C
+from pages import site_lock
 
 st.set_page_config(page_title="제주 순부하 예측 대시보드", page_icon="🍊",
                    layout="wide", initial_sidebar_state="expanded")
 
-# ── 비밀번호 게이트 (6시간 파일 토큰) ────────────────────────────────────
-AUTH_TTL_SECONDS = 6 * 3600
-
-
-def _token_valid() -> bool:
-    try:
-        return (os.path.exists(P.AUTH_TOKEN)
-                and (time.time() - os.path.getmtime(P.AUTH_TOKEN)) < AUTH_TTL_SECONDS)
-    except Exception:
-        return False
-
-
-def _write_token():
-    try:
-        with open(P.AUTH_TOKEN, "w") as f:
-            f.write(str(time.time()))
-    except Exception:
-        pass
-
-
-def check_password() -> bool:
-    if st.session_state.get("authenticated"):
-        return True
-    if _token_valid():
-        st.session_state["authenticated"] = True
-        return True
-    st.title(" ")
-    password = st.text_input("비밀번호를 입력하세요", type="password")
-    if password:
-        if password == st.secrets["password"]:
-            st.session_state["authenticated"] = True
-            _write_token()
-            st.rerun()
-        else:
-            st.error("비밀번호가 틀렸습니다.")
-    return False
-
-
-if not check_password():
+# ── 사이트 접속 잠금 (관리자 메뉴에서 켜기/끄기) ─────────────────────────
+if not site_lock.gate():
     st.stop()
 
 # ── 본문 ─────────────────────────────────────────────────────────────────
