@@ -169,14 +169,43 @@ def fetch_pt_std(
                 attempt += 1
                 time.sleep(2 ** attempt)
                 continue
+            _log_kimr_http_error_once(r.status_code, r.text)
             return None
-        except requests.RequestException:
+        except requests.RequestException as e:
             if attempt < RETRY_MAX - 1:
                 attempt += 1
                 time.sleep(2 ** attempt)
                 continue
+            _log_kimr_timeout_once(e)
             return None
     return None
+
+
+# quota 로 감지 못한 비-200 응답을 프로세스당 한 번만 덤프 -- kma_kimg._log_http_error_once
+# 와 동일 목적이지만 KIMR-nc 전용 플래그로 분리(같은 프로세스에서 KIMG 가 먼저 로그를
+# 찍어도 KIMR 쪽 캘리브레이션이 묻히지 않게).  2026-09-18 4키 풀 소진 사태 때 이 경로
+# (fetch_pt_std)가 느려졌는데 원인 로그가 전혀 없어 추가함 -- 다음 실패 사태 때 확인할 것.
+_kimr_http_error_logged = False
+_kimr_timeout_logged = False
+
+
+def _log_kimr_http_error_once(status_code: int, body: str | None) -> None:
+    global _kimr_http_error_logged
+    if _kimr_http_error_logged:
+        return
+    _kimr_http_error_logged = True
+    snippet = (body or "")[:300].replace("\n", " | ")
+    print(f"  [kimr-http] unexpected status={status_code} body[:300]={snippet!r} "
+          f"(이번 실행 첫 1회만 출력 -- 한도초과 마커 캘리브레이션용)")
+
+
+def _log_kimr_timeout_once(exc: Exception) -> None:
+    global _kimr_timeout_logged
+    if _kimr_timeout_logged:
+        return
+    _kimr_timeout_logged = True
+    print(f"  [kimr-http] 재시도 소진(네트워크 예외): {type(exc).__name__}: {exc} "
+          f"(이번 실행 첫 1회만 출력)")
 
 
 def parse_pt_std(body: str) -> dict[str, float]:
