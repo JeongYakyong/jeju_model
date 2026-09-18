@@ -167,14 +167,19 @@ def kma_quota_exceeded(status_code: int, body: str | None) -> bool:
     return False
 
 
-def rotate_kma_key(bad_key: str | None) -> bool:
+def rotate_kma_key(bad_key: str | None, status_code: int | None = None,
+                   body: str | None = None) -> bool:
     """bad_key 가 여전히 현재 키일 때만 다음 키로 전환.  남은 키 없으면 False.
 
     병렬 hf 워커 여럿이 동시에 한도 초과를 감지해도 lock + bad_key 비교로 전환은
     한 번만 일어난다 (이미 전환됐으면 True 만 반환 -- 새 키로 재시도하면 됨).
+    status_code/body 를 주면 실제 로테이션 트리거 응답을 프로세스당 1회 덤프한다
+    (2026-09-18 추가 -- kma_quota_exceeded 판정이 실제로 맞는지 확인할 유일한 증거).
     """
     global _kma_key_idx
     with _kma_key_lock:
+        if status_code is not None:
+            _log_kma_rotate_evidence_once(status_code, body)
         if current_kma_key() != bad_key:
             return True
         if _kma_key_idx + 1 >= len(_KMA_KEYS):
@@ -185,6 +190,19 @@ def rotate_kma_key(bad_key: str | None) -> bool:
             f"({_kma_key_idx + 1}/{len(_KMA_KEYS)})"
         )
         return True
+
+
+_kma_rotate_evidence_logged = False
+
+
+def _log_kma_rotate_evidence_once(status_code: int, body: str | None) -> None:
+    global _kma_rotate_evidence_logged
+    if _kma_rotate_evidence_logged:
+        return
+    _kma_rotate_evidence_logged = True
+    snippet = (body or "")[:300].replace("\n", " | ")
+    print(f"  [kma-key-evidence] 한도초과 판정 근거: status={status_code} "
+          f"body[:300]={snippet!r} (이번 실행 첫 1회만)")
 
 BASE_URL = "https://apihub.kma.go.kr/api/typ01/cgi-bin/url/nph-kim_nc_pt_txt2"
 
@@ -496,7 +514,7 @@ def fetch_one_hf(base_utc: datetime, point: dict, hf: int) -> str | None:
         try:
             r = _kma_session.get(BASE_URL, params=params, timeout=30)
             if kma_quota_exceeded(r.status_code, r.text):
-                if rotate_kma_key(key):
+                if rotate_kma_key(key, r.status_code, r.text):
                     continue  # 새 키로 즉시 재시도 (backoff 불필요)
                 return None   # 모든 키 소진
             if r.status_code == 200:

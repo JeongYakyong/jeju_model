@@ -110,10 +110,18 @@ def _k2_current() -> str | None:
     return _K2_KEYS[_k2_idx] if _K2_KEYS else None
 
 
-def _k2_rotate(bad_key: str | None, why: str) -> bool:
-    """bad_key 가 여전히 현재 키일 때만 다음 키로.  남은 키 없으면 False."""
+def _k2_rotate(bad_key: str | None, why: str, status_code: int | None = None,
+               body: str | None = None) -> bool:
+    """bad_key 가 여전히 현재 키일 때만 다음 키로.  남은 키 없으면 False.
+
+    status_code/body 를 주면(quota_exceeded 판정 경로) 실제 응답을 프로세스당 1회
+    덤프한다 -- kma_quota_exceeded 가 "정확한 초과 응답 포맷 미확인"인 채로 403/문구
+    휴리스틱만으로 판정해 왔다(2026-09-18 사태 때 진짜 원인인지 확인 불가했던 이유).
+    """
     global _k2_idx
     with _k2_lock:
+        if status_code is not None:
+            _log_kim2_rotate_evidence_once(why, status_code, body)
         if _k2_current() != bad_key:
             return True
         if _k2_idx + 1 >= len(_K2_KEYS):
@@ -121,6 +129,21 @@ def _k2_rotate(bad_key: str | None, why: str) -> bool:
         _k2_idx += 1
         print(f"  [kim2-key] {why} -> 다음 키로 전환 ({_k2_idx + 1}/{len(_K2_KEYS)})")
         return True
+
+
+_kim2_rotate_evidence_logged = False
+
+
+def _log_kim2_rotate_evidence_once(why: str, status_code: int, body: str | None) -> None:
+    """실제 로테이션 트리거가 된 응답의 원문 -- kma_quota_exceeded 판정이 맞는지
+    검증할 유일한 증거(2026-09-18 이전엔 판정 결과만 찍고 원문은 안 남겼다)."""
+    global _kim2_rotate_evidence_logged
+    if _kim2_rotate_evidence_logged:
+        return
+    _kim2_rotate_evidence_logged = True
+    snippet = (body or "")[:300].replace("\n", " | ")
+    print(f"  [kim2-key-evidence] {why} 판정 근거: status={status_code} "
+          f"body[:300]={snippet!r} (이번 실행 첫 1회만)")
 
 
 # ── HTTP fetch (구 kma_kimg.fetch_one_hf 미러 -- 세션·백오프 동일) ────────────
@@ -160,7 +183,7 @@ def fetch_pt_std(
                     continue
                 return None
             if kma_quota_exceeded(r.status_code, r.text):
-                if _k2_rotate(key, "한도 초과"):
+                if _k2_rotate(key, "한도 초과", r.status_code, r.text):
                     continue
                 return None
             if r.status_code == 200:
