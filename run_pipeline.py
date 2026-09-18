@@ -18,6 +18,7 @@
 ----
     python run_pipeline.py                     # 12z 풀 (①→④, cron 00:20 KST)
     python run_pipeline.py --steps light18     # 18z 당일예보 라이트 (①→②′→②′-2→③′, cron ~08:00 KST)
+    python run_pipeline.py --steps backfill5   # 최근 5일 결손 자동 복구 (cron 5일마다)
     python run_pipeline.py --steps collect     # 수집만 (①②)
     python run_pipeline.py --steps predict     # 예측만 (③④)
     python run_pipeline.py --steps historical,smp   # 단계 이름 나열도 가능
@@ -70,6 +71,15 @@ PIPELINE_STEPS = [
      P.COLLECT_ARCHIVE, ["--utc", "18", "--days", "3"]),
     ("chain18", "③′ 예측 체인 (18z 당일예보 → est_horizon_jeju)", P.SERVE_CHAIN,
      ["--utc", "18"]),
+    # ── 백필 안전망 (2026-09-18 도입) ──────────────────────────────────────
+    # 2026-09-03~09-17 사이 KMA 4키 풀이 소진돼 12z 가 D+1 만 나온 채 2주 가까이
+    # 아무도 모르게 방치된 사고 이후 도입. collect_forecast 의 resume-skip 설계상
+    # 이미 완전한 base 는 API 호출 없이 스킵되므로, 매번 최근 5일을 다시 확인해도
+    # 평소엔 거의 비용이 없다 — 실제로 결손이 있을 때만 재수집이 일어난다.
+    ("forecast_backfill", "②-백필 최근 5일 완결성 재확인(resume-skip)", P.COLLECT_FORECAST,
+     ["--region", "jeju", "--backfill", "5"]),
+    ("chain_backfill", "③-백필 예측 체인 재생성(최근 5일)", P.SERVE_CHAIN,
+     ["--utc", "12", "--backfill", "5"]),
 ]
 STEP_GROUPS = {
     # all = 12z 풀 파이프라인 (명시 고정 — 18z 단계는 light18 그룹 전용)
@@ -79,6 +89,8 @@ STEP_GROUPS = {
     # 18z 라이트: historical 선행 필수 — 수요 서빙의 과거창 168h(전일 23시까지 실측)와
     # 태양광 서빙의 전일 이용률 실측이 있어야 당일예보(hd=0)가 나온다.
     "light18": ["historical", "forecast18", "weather18", "chain18"],
+    # 5일마다 cron — 최근 5일 결손을 자동 복구(정상이면 거의 무비용, 사용자 결정 2026-09-18).
+    "backfill5": ["forecast_backfill", "chain_backfill"],
 }
 STEP_TIMEOUT_SECONDS = 3600   # 단계당 상한 — 예보 수집(KIMG 3지점)이 가장 오래 걸린다(~3분)
 
@@ -122,8 +134,9 @@ def main():
     parser = argparse.ArgumentParser(description="제주 수집→예측 파이프라인 (cron·관리자 공용)")
     parser.add_argument("--steps", default="all",
                         help="실행 단계 — all(12z 풀) / collect / predict / light18(18z 당일예보) "
-                             "/ 단계키 나열 (historical,forecast,weather,chain,smp,"
-                             "forecast18,weather18,chain18)")
+                             "/ backfill5(최근 5일 결손 복구) / 단계키 나열 "
+                             "(historical,forecast,weather,chain,smp,"
+                             "forecast18,weather18,chain18,forecast_backfill,chain_backfill)")
     parsed = parser.parse_args()
     selected = _resolve_steps(parsed.steps)
 

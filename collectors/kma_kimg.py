@@ -149,13 +149,17 @@ def current_kma_key() -> str | None:
 
 
 def kma_quota_exceeded(status_code: int, body: str | None) -> bool:
-    """한도 초과 응답 휴리스틱: HTTP 403, 또는 짧은 에러 body 의 마커 문자열.
+    """한도 초과 응답 휴리스틱: HTTP 403/429, 또는 짧은 에러 body 의 마커 문자열.
 
     정상 body 최소치는 KIMG 단일 hf ~1,500자 (2026-06-11 실측) -- 임계 1,000자는
     그 아래라 정상 응답엔 마커 검사가 아예 안 걸린다.  (정확한 초과 응답 포맷이
     미확인이라 보수적 휴리스틱 -- 실제 초과를 한번 겪으면 그 문구로 좁힐 것.)
+    429(Too Many Requests)는 표준 rate-limit 상태코드라 명시 추가(2026-09-18,
+    4키 풀 소진 사태 때 403/문구 매칭 둘 다 못 걸리는 애매한 응답이 있어 backoff
+    재시도로 새서 느려지는 게 의심됨 -- 실제 응답을 캘리브레이션 못 해 확증은 아님,
+    kma_kimr_nc._log_kimr_http_error_once 참고).
     """
-    if status_code == 403:
+    if status_code in (403, 429):
         return True
     if body and len(body) < 1000:
         low = body.lower()
