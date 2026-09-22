@@ -210,6 +210,7 @@ def fetch_pt_std(
 # (fetch_pt_std)가 느려졌는데 원인 로그가 전혀 없어 추가함 -- 다음 실패 사태 때 확인할 것.
 _kimr_http_error_logged = False
 _kimr_timeout_logged = False
+_kimr_empty_parse_logged = False
 
 
 def _log_kimr_http_error_once(status_code: int, body: str | None) -> None:
@@ -229,6 +230,19 @@ def _log_kimr_timeout_once(exc: Exception) -> None:
     _kimr_timeout_logged = True
     print(f"  [kimr-http] 재시도 소진(네트워크 예외): {type(exc).__name__}: {exc} "
           f"(이번 실행 첫 1회만 출력)")
+
+
+def _log_kimr_empty_parse_once(body: str) -> None:
+    """status=200 인데 parse_pt_std 결과가 빈 dict -- kim2-key/kimr-http 어느 진단에도
+    안 걸리는 사각지대(2026-09-22 발견, 09-21 00:20 KST 사고 원인 후보 1순위).
+    body 앞부분을 남겨 실제로 파일이 비었는지/형식만 다른지 다음에 확인한다."""
+    global _kimr_empty_parse_logged
+    if _kimr_empty_parse_logged:
+        return
+    _kimr_empty_parse_logged = True
+    snippet = (body or "")[:300].replace("\n", " | ")
+    print(f"  [kimr-empty] status=200 이지만 파싱 결과 비어있음 body[:300]={snippet!r} "
+          f"(이번 실행 첫 1회만 -- 발표 파일 발행 지연 의심)")
 
 
 def parse_pt_std(body: str) -> dict[str, float]:
@@ -370,7 +384,17 @@ def fetch_nc_long(points: list[dict], base_utc: datetime, days: int,
         def one(hf: int) -> tuple[int, dict[str, float]]:
             body = fetch_pt_std("KIMR", "R030", names, base_utc, hf,
                                 pt.get("lat"), pt.get("lon"), pt.get("x"), pt.get("y"))
-            return hf, (parse_pt_std(body) if body else {})
+            if body is None:
+                return hf, {}
+            parsed = parse_pt_std(body)
+            if not parsed:
+                # status=200 인데 파싱 결과가 비었다 -- 2026-09-21 00:20 KST 사고 때
+                # 전 지점·전 hf 가 "성공 0" 이면서도 kim2-key/kimr-http 진단이 전혀
+                # 안 찍혔던 것과 정합(그 경로들은 200 을 무조건 성공 취급했었다).
+                # 발표 파일이 발행 직후라 아직 다 안 쓰였을 가능성(PUBLISH_DELAY 여유
+                # 부족) -- 같은 base 를 몇 시간 뒤 수동 재시도하면 정상 파싱됐다.
+                _log_kimr_empty_parse_once(body)
+            return hf, parsed
 
         got: dict[int, dict[str, float]] = {}
         done = 0
