@@ -95,17 +95,29 @@ python run_pipeline.py --steps predict    # 예측만
 - 한 단계가 실패해도 나머지는 계속 실행하고, 실패가 있으면 종료코드 1 (cron 알림용).
 - 실행 로그: `logs/pipeline_YYYYMMDD_HHMMSS.log`
 
-### 리눅스 서버 crontab 등록 (2줄)
+### 리눅스 서버 crontab 등록 (3줄)
 
 - **12z 풀**: KMA 12z 예보는 23시(KST) 이후 안정적으로 조회되므로 **매일 00:20 KST** 전체 파이프라인.
+  ⚠ 다만 00:20 은 12z 발표(21:00 KST) + 3시간 20분 시점이라, KMA 쪽 발표 파일이 완전히 준비되기까지
+  걸리는 시간(경험상 3~5시간)의 경계에 걸릴 때가 있다 — 이때 D+2~5 가 조용히 빠지고 D+1 만
+  나온다(2026-09 여러 차례 관측, 코드버그·쿼터 문제 아님). 그래서 **`backfill5` 로 매일 재확인**한다.
 - **18z 라이트**: 18z 는 당일 03시 KST 발표 — 공개 지연(`PUBLISH_DELAY_HOURS=3`, 이론상 06시 가용)을
   넉넉히 지나 **매일 08:00 KST** 에 당일예보를 돈다. ⚠ 실제 발표 지연은 지속 관찰 대상
   (2026-07-18 세팅) — 로그에서 18z 미가용 경고가 반복되면 08:30 으로 늦춘다.
+- **`backfill5`(미수집 방지)**: 최근 5일치 12z base 의 완결성을 재확인해 결손이 있는 base 만
+  재수집한다(resume-skip 설계 — 이미 완전한 base 는 API 호출 없이 스킵, 평소엔 거의 무비용).
+  KMA 발표 파일이 확실히 안정화됐을 **매일 05:00 KST**(00:20 시도로부터 +4h40m)에 돌려
+  전날 결손을 다음날 아침까지는 항상 메운다(2026-09-22 도입 — 최초엔 5일마다였다가 하루 결손이
+  최대 5일 방치될 수 있어 매일로 변경).
 
 ```cron
 # crontab -e  (서버 시간대가 KST 인지 확인: timedatectl)
 # 매일 00:20 — 12z 풀 (수집→예측 전체, 익일~5일후)
 20 0 * * * cd /opt/jeju_model && ./venv/bin/python run_pipeline.py >> logs/cron.log 2>&1
+
+# 매일 05:00 — 최근 5일 결손 자동 재확인/복구 (00:20 이 KMA 발표 준비 전이라 D+2~5 가
+# 빠졌을 경우의 안전망 — resume-skip 이라 결손 없으면 API 호출 없이 즉시 종료)
+0 5 * * * cd /opt/jeju_model && ./venv/bin/python run_pipeline.py --steps backfill5 >> logs/cron.log 2>&1
 
 # 매일 08:00 — 18z 당일예보 라이트 (실측+18z 수집+체인, SMP 없음)
 0 8 * * * cd /opt/jeju_model && ./venv/bin/python run_pipeline.py --steps light18 >> logs/cron.log 2>&1

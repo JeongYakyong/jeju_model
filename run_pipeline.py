@@ -18,7 +18,7 @@
 ----
     python run_pipeline.py                     # 12z 풀 (①→④, cron 00:20 KST)
     python run_pipeline.py --steps light18     # 18z 당일예보 라이트 (①→②′→②′-2→③′, cron ~08:00 KST)
-    python run_pipeline.py --steps backfill5   # 최근 5일 결손 자동 복구 (cron 5일마다)
+    python run_pipeline.py --steps backfill5   # 최근 5일 결손 자동 복구 (cron 매일 05:00 KST)
     python run_pipeline.py --steps collect     # 수집만 (①②)
     python run_pipeline.py --steps predict     # 예측만 (③④)
     python run_pipeline.py --steps historical,smp   # 단계 이름 나열도 가능
@@ -89,7 +89,11 @@ STEP_GROUPS = {
     # 18z 라이트: historical 선행 필수 — 수요 서빙의 과거창 168h(전일 23시까지 실측)와
     # 태양광 서빙의 전일 이용률 실측이 있어야 당일예보(hd=0)가 나온다.
     "light18": ["historical", "forecast18", "weather18", "chain18"],
-    # 5일마다 cron — 최근 5일 결손을 자동 복구(정상이면 거의 무비용, 사용자 결정 2026-09-18).
+    # 매일 05:00 KST cron — 최근 5일 결손을 자동 복구(정상이면 거의 무비용).
+    # 2026-09-18 도입 땐 5일마다였다가, 2026-09-22 매일로 변경 — 00:20 이 KMA 12z 발표
+    # (21:00 KST) + 3시간 20분 시점이라 발표 파일 준비(경험상 3~5시간 소요)를 못 기다려
+    # D+2~5 가 조용히 빠지는 사고가 반복 관측됨(쿼터·코드버그 아님, 그 시각 한정 문제).
+    # 5일마다면 하루 결손이 최대 5일 방치될 수 있어 매일 재확인으로 바꿨다.
     "backfill5": ["forecast_backfill", "chain_backfill"],
 }
 STEP_TIMEOUT_SECONDS = 3600   # 단계당 상한 — 예보 수집(KIMG 3지점)이 가장 오래 걸린다(~3분)
