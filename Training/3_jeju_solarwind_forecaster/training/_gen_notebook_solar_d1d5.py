@@ -1,41 +1,37 @@
-"""train_solar_d1d5_colab.ipynb 생성기 — solar PatchTST D+1~D+5 재학습 (2026-07-30).
+"""train_solar_d1d5_colab.ipynb 생성기 — solar PatchTST 재학습 (2026-10-02 train/serve skew 해소).
 
-왜 새 빌더인가
+2026-10-02 재학습 — 무엇이 바뀌었나
 ================================================================================
-기존 빌더 둘을 하나로 합치고 운영 조건에 맞춘 것이다.
-  - `_gen_notebook.py`        : D+1 solar+wind + 스케일러·metadata 생성
-  - `_gen_notebook_direct.py` : D+2~D+6 direct(offset) 학습, 스케일러는 재사용
-이번 재학습은 **solar 만 / D+1~D+5 / 한 노트북**이라, 스케일러를 새로 만들면
-D+1 도 같은 스케일러로 다시 학습해야 해서(불일치 방지) 둘을 합치는 게 맞다.
+★핵심: **학습의 "미래" 입력을 실측(ASOS)에서 예보로 바꾼다.**
+  구 노트북은 과거·미래 슬라이스를 같은 ASOS 열에서 잘랐다(`future_idx` 공용).  그런데
+  서빙은 과거=ASOS / 미래=KIMG 예보를 먹는다 — 모델은 "미래 날씨를 완벽히 안다"고 배우고
+  서빙에서만 불완전한 예보를 받았다(train/serve skew).  과소예측의 핵심 원인.
 
-사용자 확정 (2026-07-30)
-================================================================================
-  - **solar 만** 재학습한다. wind 는 LGBM 이 담당하고 이미 재학습·배포했다
-    (하이브리드 구성: SOLAR=PatchTST / WIND=LGBM).
-  - **지평 D+1~D+5** (offset 0/24/48/72/96h). 운영 지평 5일·예보 수집 --days 5 와 일치.
-    구 D+6·D+7 은 만들지 않는다.
-  - (구) 학습창 train ≤2026-01 / val 2026-02~05 / test 2026-06~07
+  미래 열 = `*_fut` (fit_jma_monthly_qm.py → export_solarwind_csv.py --with-future):
+    운량      = **JMA 만** (KIMG 운량은 과대라 부적절 — 사용자 확정). 서빙도 JMA 운량 예보를 받는다.
+                ~2022-07-01 JMA 분석치 → JMA D+1 예보 분포 월별 QM / 2022-07-02~ JMA D+1 예보
+    일사·강수 = KIMG.  ~2025-12-19 JMA → KIMG 12z D+1 월별 QM / 2025-12-20~ 실제 KIMG 12z D+1
+    중하층운량은 피처에서 뺀다 (JMA previous run 에 층별운량 없음).
 
-2026-08-25 재학습 — 바뀐 것 둘
-================================================================================
-근거는 `../REPORT_cloud_feature_audit.md` (운량 피처 정밀 감사).
-  1. **`Year_sin`/`Year_cos` 를 solar 피처에 추가.**  구 구성은 solar 만 Hour 둘뿐이고
-     wind 엔 Year 가 있었다 — 대칭이 깨진 누락이다.  계절에 따라 운량-태양광 관계가
-     크게 다른데(실측 회귀 계수: 일사 겨울 0.238 vs 여름 0.094, 전운량 가을 -0.138 vs
-     여름 -0.045) 모델이 계절을 몰랐다.
-  2. **val 을 봄 4개월 → 2025년 1년(4계절)으로.**  구 분할은 early stopping·best-epoch·
-     ReduceLROnPlateau 가 전부 봄 val loss 로 결정돼 모델 선택이 계절에 치우쳤다.
+  1. `PatchTSTDatasetH` 가 과거 블록(ASOS)·미래 블록(`_fut`)을 따로 읽는다.
+  2. 스케일러는 **변수별로 과거+미래 값을 모아서** train 구간에서 적합한다 — 서빙이 한
+     스케일러로 둘 다 변환하므로 같은 물리량은 같은 범위여야 한다.  열 이름은 기존과 같다.
+  3. **피처 단순화: 지점별 [solar_rad, total_cloud(JMA)] + Hour_sin/cos (6개).**
+     midlow_cloud(JMA 예보에 없음)·solar_damping·Kt 제거 — 실험(2026-10-02)에서 Kt·강수감쇠를 빼도
+     나빠지지 않았고 permutation 비중도 거의 0 이었다.
+  4. **07-30 구성으로 복원** — Year_sin/cos 없음, train ≤2026-01 / val 2026-02~05 / test 2026-06~.
+     08-25 재학습(Year + val 4계절)은 실패했고 두 변경을 같이 해 원인 분리가 안 됐다.
+     이번엔 "미래 소스 + 피처 단순화" 만 바꾼다. 최근 표본 가중치(반감기)는 차이가 없어 쓰지 않는다.
+  5. **D+1 만 기본 학습** (목표 = D+1 정확도).  D+2~D+5 는 평가 ②로 "D+1 가중치 재사용"을
+     먼저 검증하고, 필요하면 `TRAIN_D2_TO_D5=True` 로 offset 학습.
+  6. 결측이 낀 윈도우는 **건너뛴다** (구: ffill/bfill 로 채움 — 2026-07-31~08-02 같은 3일
+     발표 누락을 가짜 값으로 메웠다).
+  7. test 평가를 **best 에폭 가중치**로 한다 (구: 마지막 에폭 모델로 재고 있었다).
 
-기대치 (LOMO·LGBM 대리모델, 7개월 평균 — PatchTST 실측 아님)
-  MAE 0.1181 → 0.1106,  맑은날(su>0.6) 편향 -0.0823 → -0.0734,  8월 -0.099 → -0.044.
-  ⚠**맑은날 과소예측이 이걸로 해결되지는 않는다.**  원인은 예보 운량의 정의 어긋남
-    (`tcld` 는 권운을 100% 반영, ASOS 전운량은 45%만)이고 입력 쪽 문제다.
-    실측 입력으로 돌리면 여름 맑음 편향이 이미 -0.031 이라 모델 쪽 여지가 좁다.
-
-서빙 영향: **없다.**  `serve_solarwind._build_solar_direct` 가 `patchtst._add_time_feats`
-로 Year_sin/cos 를 이미 만들고, `_infer` 는 `md['future_features_solar']` 로 열을 고르며,
-`num_features` 도 `len(md['features_solar'])` 에서 나온다 → 새 metadata·가중치만 넣으면 된다..
-  - 입력 CSV 는 `export_solarwind_csv.py` 가 **메인 DB** 에서 뽑은 것을 쓴다.
+평가 셀 (test 구간, 서빙과 같은 00시 시작 윈도우, 낮 시간)
+  ① 새 D+1(JMA 운량) vs 현행 서빙 D+1(KIMG 운량·중하층) — 각자 서빙될 입력, 같은 날짜
+  ② 새 D+1 가중치를 D+2 에 재사용 vs 현행 D+2 — JMA 운량 예보가 D+2 까지뿐이라 D+3~ 은 평가 불가
+  ③ permutation importance (확인용)
 
 절대 바꾸면 안 되는 것 (서빙 호환)
 ================================================================================
@@ -43,7 +39,7 @@ D+1 도 같은 스케일러로 다시 학습해야 해서(불일치 방지) 둘�
   forecasting/patchtst.py       SOLAR_HP = patch_len24/stride12/d_model256/heads4/layers3/d_ff1024
                                 SEQ_LEN_SOLAR=336, PRED_LEN=24
   forecasting/serve_solarwind.py 가 D+2~ 를 `best_patchtst_solar_model_D{n}.pth` 로 찾는다
-→ SOLAR_HP·피처 순서·파일명을 바꾸면 로드가 깨진다. 이 노트북은 그대로 유지한다.
+→ SOLAR_HP·파일명을 바꾸면 로드가 깨진다.  피처 수는 metadata 에서 읽으므로 피처 변경은 괜찮다.
 
 metadata.pkl 은 solar·wind 키를 **함께** 갖는다. wind 를 재학습하지 않아도
 서빙(patchtst.load_assets)이 wind 키를 읽으므로 기존과 동일하게 재현해 넣는다.
@@ -67,36 +63,36 @@ def code(s):
 
 # ── 0. 개요 ───────────────────────────────────────────────────────────────
 md(r"""
-# 제주 Solar 이용률 PatchTST — D+1~D+5 재학습 (2026-07-30)
+# 제주 Solar 이용률 PatchTST — 예보 기반 미래 입력 재학습 (2026-10-02)
 
-**solar 만** 재학습한다. wind 는 LGBM 담당이라 이 노트북에 없다.
+학습의 **미래 입력을 실측(ASOS) → 예보**로 바꿔 train/serve skew 를 없앤다.
+운량 = **JMA**(KIMG 운량 미사용), 일사·강수 = KIMG(과거 구간은 JMA 월별 QM).
+과거 입력은 기존대로 ASOS. 피처 = 지점별 **일사·운량** + 시간(6개). 목표는 **D+1 정확도**.
 
 ## 준비물 (좌측 파일창에 업로드)
-- `solarwind_raw_jeju.csv` — 로컬에서 `export_solarwind_csv.py` 로 메인 DB 에서 뽑은 것.
-  2020-01-01 ~ 2026-07-31, 57,696행, 약 10MB.
+- `solarwind_raw_jeju_trainserve.csv` — 로컬에서
+  `export_solarwind_csv.py --with-future --out .../solarwind_raw_jeju_trainserve.csv` 로 만든 것.
+- (비교용, 선택) 현행 서빙 모델을 `/content/old_model/` 에:
+  `best_patchtst_solar_model.pth`, `MinMax_scaler_solar.pkl`, `metadata.pkl`
+  (`models/solarwind_patchtst/`), `best_patchtst_solar_model_D2..D5.pth`
+  (`models/solarwind_patchtst_horizon/`). 없으면 비교 행만 빠진다.
 
 ## 런타임
-**반드시 GPU 런타임**으로 바꾼다: 런타임 → 런타임 유형 변경 → T4 GPU.
-CPU 로 돌리면 몇 시간 걸린다. 아래 첫 셀이 DEVICE 를 찍으니 `cuda` 인지 확인할 것.
+**반드시 GPU 런타임**: 런타임 → 런타임 유형 변경 → T4 GPU. 첫 셀이 DEVICE 를 찍는다.
 
-## 산출물 (마지막 셀이 zip 으로 묶어 다운로드)
+## 산출물 (zip 으로 다운로드)
 | 파일 | 반입 위치 |
 |---|---|
 | `best_patchtst_solar_model.pth` (D+1) | `models/solarwind_patchtst/` |
 | `MinMax_scaler_solar.pkl`, `metadata.pkl` | `models/solarwind_patchtst/` |
-| `best_patchtst_solar_model_D2..D5.pth` | `models/solarwind_patchtst_horizon/` |
+| (`TRAIN_D2_TO_D5=True` 일 때만) `best_patchtst_solar_model_D2..D5.pth` | `models/solarwind_patchtst_horizon/` |
 
-> ⚠ **5개 모델은 한 세트다.** 스케일러를 새로 만들기 때문에 D+1~D+5 를 전부 같이
-> 반입해야 한다. 일부만 바꾸면 옛 스케일러로 학습된 모델과 섞여 예측이 틀어진다.
-
-## 예상 시간
-T4 기준 모델당 10~25분, 5개 합쳐 **1~2시간** 정도다(조기종료라 데이터에 따라 다름).
-각 지평이 끝날 때마다 가중치가 저장되므로 중간에 끊겨도 그때까지는 건진다.
+> ⚠ **스케일러·피처 구성이 바뀐다(10 → 6개).** 옛 D2~D5 가중치는 새 metadata 로 로드되지 않아
+> 서빙이 멈춘다 — 반입 안내(맨 끝) 참고.
 """)
 
 # ── 1. import ─────────────────────────────────────────────────────────────
 code(r"""
-# Colab 기본 제공으로 추가 설치 불필요 (torch/pandas/sklearn/joblib)
 import os, time
 import numpy as np
 import pandas as pd
@@ -105,9 +101,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error
 import joblib
 from tqdm.auto import tqdm
+try:
+    import pvlib                       # 낮 시간 판정(태양고도)용 — Colab 기본 미포함
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'pvlib'])
+    import pvlib
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('DEVICE =', DEVICE)
@@ -122,40 +123,58 @@ code(r"""
 # ==========================================================================
 # CONFIG — 경로 / 학습창 / 지평 / 하이퍼파라미터
 # ==========================================================================
-CSV_PATH = '/content/solarwind_raw_jeju.csv'   # 업로드한 CSV
+CSV_PATH = '/content/solarwind_raw_jeju_trainserve.csv'
 OUT_DIR  = '/content/out'
+OLD_MODEL_DIR = '/content/old_model'   # 비교용 현행 서빙 모델 (없으면 비교 행 생략)
 os.makedirs(OUT_DIR, exist_ok=True)
 
 PRED_LEN = 24            # 한 번에 24h 예측
 
-# 학습창 (2026-08-25 재설계 — 구 경계는 val 이 봄 4개월뿐이라 모델 선택이 계절에 치우쳤다)
-#   구: train <=2026-01 / val 2026-02~05(봄만) / test 2026-06~07(여름만)
-#   → early stopping·best-epoch·ReduceLROnPlateau 가 전부 '봄' val loss 로 결정됐다.
-#     계절에 따라 su~운량 관계가 크게 다른데(실측 회귀: 일사 계수 겨울 0.238 vs 여름 0.094,
-#     전운량 계수 가을 -0.138 vs 여름 -0.045) 모델 선택이 한 계절만 봤다.
-#   신: val 을 1년(4계절)으로 잡는다.  데이터가 2020-01~ 6년 8개월치라 여유가 있다.
-TRAIN_END = '2024-12-31 23:00'      # train = 2020-01 ~ 2024-12 (5년, 여름 5회)
-VAL_END   = '2025-12-31 23:00'      # val   = 2025 전체 (4계절 — 모델 선택 기준)
-TEST_END  = None                    # test  = 2026-01 ~ 데이터 끝.  None = 끝까지 자동
+# 학습창 — 07-30 구성(현행 서빙 모델과 같은 경계)으로 복원. test 만 데이터 끝까지 늘어난다.
+#   08-25 의 "val = 2025 전체" 재분할은 Year_sin/cos 와 함께 실패했다(원인 분리 불가).
+TRAIN_END = '2026-01-31 23:00'      # train = 2020-01 ~ 2026-01
+VAL_END   = '2026-05-31 23:00'      # val   = 2026-02 ~ 05
+TEST_END  = None                    # test  = 2026-06 ~ 데이터 끝 (None = 자동)
 
-# ★ direct 지평: 이름 -> future/target 윈도우를 뒤로 미는 offset(시간).
-#   D+1 은 offset 0 (과거 윈도우 바로 다음 24h). offset 은 24의 배수여야 날짜 경계와 맞는다.
-#   운영 지평이 5일이라 D+6·D+7 은 만들지 않는다.
-HORIZONS = {'D1': 0, 'D2': 24, 'D3': 48, 'D4': 72, 'D5': 96}
+# 미래 입력 열 접미사 — export_solarwind_csv.py --with-future 가 만든다
+FUTURE_SUFFIX = '_fut'              # 운량 JMA / 일사·강수 KIMG(과거는 JMA 월별 QM)
+EVAL_REUSE_HORIZONS = [2]           # 평가 ②: _fut_d2 = JMA 운량 D+2 + KIMG D+2 (JMA 운량 예보는 D+2 까지뿐)
+OLD_MODEL_SUFFIX = '_kimg'          # 평가 ①②: 현행 서빙 모델이 실제로 받는 KIMG 원본 (_kimg_d{n} = D+n)
+
+# ★ 학습 지평. 목표가 D+1 이라 기본은 D+1 만. 평가 ② 결과 "재사용 불가"면 True 로 다시 돌린다.
+TRAIN_D2_TO_D5 = False
+HORIZONS_ALL = {'D1': 0, 'D2': 24, 'D3': 48, 'D4': 72, 'D5': 96}
+HORIZONS = HORIZONS_ALL if TRAIN_D2_TO_D5 else {'D1': 0}
 
 SOLAR_STATIONS = ['west', 'south']   # east 는 예보에 일사·구름이 없어 제외
 WIND_STATIONS  = ['west', 'east']    # metadata 재현용 (이 노트북은 wind 를 학습하지 않는다)
-DIR_STATION    = 'west'
 
 # ── Solar 하이퍼파라미터 — forecasting/patchtst.py SOLAR_HP 와 반드시 동일 ──
 SOLAR_HP = dict(seq_len=336, patch_len=24, stride=12,
                 d_model=256, num_heads=4, num_layers=3, d_ff=1024, dropout=0.2)
 WIND_SEQ_LEN = 72        # metadata 의 SEQ_LEN_WIND (기존값 유지)
 
+# 최근 표본 가중치 (반감기 N년 → N년 전 표본의 손실 가중치 = 0.5). 기본 끔.
+#   2026-10-02 실험: 반감기 없음/1/1.5/2/3 의 val MAE 차이가 시드 흔들림 안이었다 → 단순한 쪽(끔).
+RECENCY_HALF_LIFE_YEARS = None
+
 EPOCHS = 100
 BATCH_SIZE = 128
 LR = 1e-3
 PATIENCE = 15
+
+# 손실 가중치 — 흐린 시각(실측 <= 0.25) 가중, 그 시각 과대예측 추가 벌점. 구 값 3.0 / 1.5.
+#   2026-10-02 서빙 비교: 미래 입력이 예보(불확실)가 되자 이 비대칭이 모델을 전반적으로 낮게 잡게 만들어
+#   JMA 가 맑다고 해도 밝은 시각을 과소예측(-0.083 vs 현행 -0.052) → 1.0 / 1.0(일반 MSE)로 재학습해 비교.
+LOSS_CLOUDY_WEIGHT = 1.0
+LOSS_OVERPREDICT_PENALTY = 1.0
+
+# 낮 시간 판정 (평가용) — 태양고도 5° 이상. serve_solarwind 의 JEJU_LAT/LON·SOLAR_ELEV_MIN 과 같은 값
+SOLAR_LAT, SOLAR_LON, SOLAR_ELEV_MIN = 33.38, 126.55, 5.0
+
+# 평가 — 서빙은 항상 대상일 00시부터 24h 를 낸다. 맑음/흐림은 실측 이용률로 가른다.
+SERVING_START_HOURS = [0]
+CLEAR_UTIL, CLOUDY_UTIL = 0.6, 0.25
 """)
 
 # ── 3. 데이터 로드 ────────────────────────────────────────────────────────
@@ -165,107 +184,168 @@ df['timestamp'] = pd.to_datetime(df['timestamp'])
 df = df.set_index('timestamp').sort_index()
 print('rows:', len(df), '| range:', df.index.min(), '->', df.index.max())
 
-# 시간 파생
+# 시간 파생 (Year 는 새 모델 피처가 아니다 — 비교용 옛 모델·wind metadata 재현에만 쓰인다)
 df['Hour_sin'] = np.sin(2*np.pi*df.index.hour/24)
 df['Hour_cos'] = np.cos(2*np.pi*df.index.hour/24)
 df['Year_sin'] = np.sin(2*np.pi*df.index.dayofyear/365)
 df['Year_cos'] = np.cos(2*np.pi*df.index.dayofyear/365)
 
-# 짧은 결측 보간 (기존 학습과 동일: limit=3)
+# 짧은 결측만 보간 (limit=3, 서빙과 같은 한도). ffill/bfill 은 하지 않는다 —
+#   긴 결측(예: 2026-07-31~08-02 12z 발표 누락, 2024-01~02 JMA 일사 결측)을 가짜 값으로 채우게 된다.
+#   남은 결측이 낀 윈도우는 Dataset 에서 건너뛴다.
 num_cols = df.select_dtypes(include='number').columns
-df[num_cols] = df[num_cols].interpolate(limit=3)
-df[num_cols] = df[num_cols].ffill().bfill()
+df[num_cols] = df[num_cols].interpolate(limit=3, limit_area='inside')
 
-# TEST_END=None 이면 데이터 끝까지를 test 로 쓴다 (재수출할 때마다 날짜를 고칠 필요 없게).
 if TEST_END is None:
     TEST_END = df.index.max().strftime('%Y-%m-%d %H:%M')
     print('TEST_END 자동설정 ->', TEST_END)
 
-# 학습창이 데이터 안에 들어오는지 먼저 확인 (여기서 걸러야 학습 몇 시간 날리지 않는다)
 for name, bound in [('TRAIN_END', TRAIN_END), ('VAL_END', VAL_END), ('TEST_END', TEST_END)]:
     assert df.index.min() < pd.Timestamp(bound) <= df.index.max() + pd.Timedelta('1h'), \
         f'{name}={bound} 가 데이터 범위 밖이다 ({df.index.min()} ~ {df.index.max()})'
-n_tr = (df.index <= TRAIN_END).sum()
-n_va = ((df.index > TRAIN_END) & (df.index <= VAL_END)).sum()
-n_te = ((df.index > VAL_END) & (df.index <= TEST_END)).sum()
-print(f'train {n_tr}행 / val {n_va}행 / test {n_te}행')
-
-# ★val 이 4계절을 담는지 못 박는다 — 이번 재설계의 핵심이라 여기서 걸러야 한다.
-va_months = sorted(df[(df.index > TRAIN_END) & (df.index <= VAL_END)].index.month.unique())
-print('val 이 담은 월:', va_months)
-assert len(va_months) >= 12, f'val 이 4계절을 못 담는다 (월 {va_months}) — 계절 편향 재발'
+fut_cols = [c for c in df.columns if c.endswith(FUTURE_SUFFIX)]
+assert fut_cols, f'{FUTURE_SUFFIX} 열이 없다 — export_solarwind_csv.py --with-future 로 만든 CSV 인지 확인'
 """)
 
-# ── 4. Solar 피처 + metadata 용 wind 피처 ─────────────────────────────────
+# ── 4. Solar 피처 ─────────────────────────────────────────────────────────
 code(r"""
 # ==========================================================================
-# Solar 피처 파생 (지점별) — 기존 학습과 동일한 순서를 유지해야 서빙이 맞는다
+# Solar 피처 — 과거(ASOS)·미래(예보) 블록이 "같은 피처를 같은 순서로" 갖는다
+#   블록 접미사:  ''  = ASOS 과거 / '_fut' = 학습 미래 / '_fut_d{n}' = 평가 ② 전용
 # ==========================================================================
-def add_solar_damping(df, st):
-    daily = df.groupby(df.index.date)[f'rainfall_{st}'].transform(
-        lambda x: x.between_time('06:00', '20:00').sum())
-    df[f'solar_damping_{st}'] = np.exp(-0.163 * daily.clip(upper=10))
+def is_daytime_hours(index):
+    # 시간적산값이라 시각-30분(구간 중앙)의 태양고도로 판정 — 낮 시간 지표 계산용
+    times = pd.DatetimeIndex(index) - pd.Timedelta(minutes=30)
+    times = times.tz_localize('Asia/Seoul') if times.tz is None else times.tz_convert('Asia/Seoul')
+    elevation = pvlib.solarposition.get_solarposition(times, SOLAR_LAT, SOLAR_LON)['apparent_elevation']
+    return elevation.values >= SOLAR_ELEV_MIN
 
-for st in SOLAR_STATIONS:
-    add_solar_damping(df, st)
+
+df['is_daytime'] = is_daytime_hours(df.index)
+
+
+def add_derived_block(df, suffix):
+    # 현행 서빙 모델 비교용 solar_damping 파생 (새 모델 피처엔 없다) — 서빙 _add_solar_damping 과 같은 식
+    for st in SOLAR_STATIONS:
+        rain = f'rainfall_{st}{suffix}'
+        daily = df.groupby(df.index.date)[rain].transform(
+            lambda x: x.between_time('06:00', '20:00').sum())
+        df[f'solar_damping_{st}{suffix}'] = np.exp(-0.163 * daily.clip(upper=10))
+
+
+OLD_MODEL_HORIZONS = [2, 3, 4, 5]
+BLOCK_SUFFIXES = (['', FUTURE_SUFFIX] + [f'{FUTURE_SUFFIX}_d{n}' for n in EVAL_REUSE_HORIZONS]
+                  + [OLD_MODEL_SUFFIX] + [f'{OLD_MODEL_SUFFIX}_d{n}' for n in OLD_MODEL_HORIZONS])
+for suffix in BLOCK_SUFFIXES:
+    add_derived_block(df, suffix)
 
 df['Solar_Utilization'] = df['real_solar_utilization_jeju'].clip(0, 1)
 
+# ★이 순서가 곧 스케일러 열 순서이자 서빙 입력 순서다. 이름은 과거(ASOS) 기준.
 future_features_solar = []
 for st in SOLAR_STATIONS:
-    future_features_solar += [f'solar_rad_{st}', f'total_cloud_{st}',
-                              f'midlow_cloud_{st}', f'solar_damping_{st}']
-# ★Year_sin/cos 추가 (2026-08-25).  구 구성은 solar 만 Hour 둘뿐이고 wind 엔 Year 가
-#   있었다 — 대칭이 깨진 누락이다.  계절에 따라 운량-태양광 관계가 크게 달라지는데
-#   모델이 계절을 몰랐다.  실측 LOMO 검증(LGBM 대리, 7개월 평균):
-#     MAE 0.1181 -> 0.1106,  맑은날(su>0.6) 편향 -0.0823 -> -0.0734  (8월은 -0.099 -> -0.044)
-#   ⚠선형 모델에선 이득이 없다(절편만 움직인다).  비선형이라야 계절별 가중을 바꾼다.
-#   ⚠뒤에만 붙인다 — 이 순서가 곧 스케일러 열 순서이자 서빙 입력 순서다.
-future_features_solar += ['Hour_sin', 'Hour_cos', 'Year_sin', 'Year_cos']
+    future_features_solar += [f'solar_rad_{st}', f'total_cloud_{st}']
+future_features_solar += ['Hour_sin', 'Hour_cos']
 features_solar = future_features_solar + ['Solar_Utilization']
 print('solar future_features (%d):' % len(future_features_solar), future_features_solar)
 
+TIME_FEATURES = {'Hour_sin', 'Hour_cos', 'Year_sin', 'Year_cos'}   # 과거·미래 공용 (접미사 없음)
+
+
+def block_columns(names, suffix):
+    return [n if (suffix == '' or n in TIME_FEATURES) else n + suffix for n in names]
+
+
+def raw_columns(suffix):
+    # 결측 판정용 원천 열 — 파생 열(damping)은 원천이 결측일 때만 결측이다
+    return [f'{v}_{st}{suffix}' for v in ['solar_rad', 'total_cloud', 'rainfall']
+            for st in SOLAR_STATIONS]
+
+
+print('\n미래 블록 결측률(구간별):')
+for label, part in [('train', df[df.index <= TRAIN_END]),
+                    ('val',   df[(df.index > TRAIN_END) & (df.index <= VAL_END)]),
+                    ('test',  df[(df.index > VAL_END) & (df.index <= TEST_END)])]:
+    print(f'  {label:5s}', part[raw_columns(FUTURE_SUFFIX)].isna().any(axis=1).mean().round(4))
+
 # ── metadata 재현용 wind 피처 (학습하지 않는다) ──
-# 서빙 patchtst.load_assets 가 metadata 의 wind 키를 읽으므로 기존과 같은 값을 넣어 둔다.
-WIND_SPD_CAP, CUTOFF_WIND_SPD = 20.0, 25.0
 future_features_wind = []
 for st in WIND_STATIONS:
     future_features_wind += [f'wind_spd_{st}', f'wind_zone_{st}']
 future_features_wind += ['wd_sin', 'wd_cos', 'Hour_sin', 'Hour_cos', 'Year_sin', 'Year_cos']
 features_wind = future_features_wind + ['Wind_Utilization']
-print('wind  future_features (%d, 학습 안 함):' % len(future_features_wind), future_features_wind)
 """)
 
-# ── 5. Dataset (offset 지원) ──────────────────────────────────────────────
+# ── 5. Dataset ────────────────────────────────────────────────────────────
 code(r"""
 # ==========================================================================
-# Dataset — future/target 윈도우를 offset 만큼 뒤로 민다 (direct 다지평)
-#   과거 윈도우는 origin 까지 그대로 → 누수 없음. offset=0 이면 D+1(기존 구조)과 동일.
+# Dataset — 과거 블록(ASOS)과 미래 블록(예보)을 따로 읽는다
+#   data 열 구성 = [과거 피처 F개 | 미래 피처 F개 | 타깃 1개]
+#   offset 만큼 미래/타깃 윈도우를 뒤로 민다 (D+n direct). 과거 윈도우는 origin 까지 → 누수 없음.
+#   결측 행이 하나라도 낀 윈도우는 건너뛴다.
 # ==========================================================================
 class PatchTSTDatasetH(Dataset):
-    def __init__(self, data_array, seq_len, pred_len, future_idx, target_idx, offset=0):
-        self.data = data_array
-        self.seq_len = seq_len
-        self.pred_len = pred_len
-        self.future_idx = future_idx
-        self.target_idx = target_idx
-        self.offset = offset
+    def __init__(self, arr, seq_len, pred_len, offset=0, start_hours=None, future_start_min=None):
+        self.data = arr['data']
+        self.sample_weight = arr.get('sample_weight', np.ones(len(self.data), dtype=np.float32))
+        self.seq_len, self.pred_len = seq_len, pred_len
+        num_feats = (self.data.shape[1] - 1) // 2
+        self.past_idx = list(range(num_feats))
+        self.future_idx = list(range(num_feats, 2 * num_feats))
+        self.target_idx = 2 * num_feats
+
+        n_windows = max(len(self.data) - seq_len - offset - pred_len + 1, 0)
+        starts = np.arange(n_windows)
+        future_starts = starts + seq_len + offset
+        past_bad_cum = np.concatenate([[0], np.cumsum(arr['past_bad'])])
+        future_bad_cum = np.concatenate([[0], np.cumsum(arr['future_bad'])])
+        ok = (past_bad_cum[starts + seq_len] == past_bad_cum[starts]) & \
+             (future_bad_cum[future_starts + pred_len] == future_bad_cum[future_starts])
+        timestamps = arr['timestamps']
+        if start_hours is not None:
+            ok &= np.isin(timestamps[future_starts].hour, start_hours)
+        if future_start_min is not None:
+            ok &= timestamps[future_starts] > pd.Timestamp(future_start_min)
+        self.starts = starts[ok]
+        self.future_starts = future_starts[ok]
 
     def __len__(self):
-        return len(self.data) - self.seq_len - self.offset - self.pred_len + 1
+        return len(self.starts)
 
-    def __getitem__(self, idx):
-        past = self.data[idx: idx + self.seq_len]
-        past_numeric = past[:, self.future_idx]
-        past_y = past[:, self.target_idx: self.target_idx + 1]
-        s = idx + self.seq_len + self.offset          # ★ offset 만큼 뒤로
-        fut = self.data[s: s + self.pred_len]
+    def __getitem__(self, i):
+        start, future_start = self.starts[i], self.future_starts[i]
+        past = self.data[start: start + self.seq_len]
+        future = self.data[future_start: future_start + self.pred_len]
         return {
-            'past_numeric':   torch.FloatTensor(past_numeric),
-            'past_y':         torch.FloatTensor(past_y),
-            'future_numeric': torch.FloatTensor(fut[:, self.future_idx]),
-            'future_y':       torch.FloatTensor(fut[:, self.target_idx]),
+            'past_numeric':   torch.from_numpy(past[:, self.past_idx]),
+            'past_y':         torch.from_numpy(past[:, self.target_idx: self.target_idx + 1]),
+            'future_numeric': torch.from_numpy(future[:, self.future_idx]),
+            'future_y':       torch.from_numpy(future[:, self.target_idx]),
+            'future_start':   int(future_start),
+            'sample_weight':  float(self.sample_weight[future_start]),
         }
+
+
+def fit_pooled_scaler(train_part, names):
+    # 같은 물리량은 과거(ASOS)·미래(예보) 값을 모아 한 범위로 맞춘다 — 서빙도 한 스케일러로 둘 다 변환한다.
+    past = train_part[block_columns(names, '')]
+    future = train_part[block_columns(names, FUTURE_SUFFIX)].set_axis(names, axis=1)
+    return MinMaxScaler(feature_range=(0, 1)).fit(pd.concat([past, future]).dropna())
+
+
+def build_array(part, names, scaler, future_suffix):
+    # 스케일러는 과거 이름(names)으로 적합돼 있다 — 미래 블록도 이름을 바꿔 같은 스케일러로 변환한다.
+    past = scaler.transform(part[block_columns(names, '')])
+    future = scaler.transform(part[block_columns(names, future_suffix)].set_axis(names, axis=1))
+    target = part[['Solar_Utilization']].values
+    data = np.hstack([past, future, target]).astype(np.float32)
+    return {
+        'data': np.nan_to_num(data),     # 결측 행은 past_bad/future_bad 로 이미 제외된다
+        'past_bad': part[raw_columns('') + ['Solar_Utilization']].isna().any(axis=1).values,
+        'future_bad': part[raw_columns(future_suffix) + ['Solar_Utilization']].isna().any(axis=1).values,
+        'timestamps': part.index,
+        'is_daytime': part['is_daytime'].values,
+    }
 """)
 
 # ── 6. Model ──────────────────────────────────────────────────────────────
@@ -343,6 +423,12 @@ class PatchTST_Weather_Model(nn.Module):
         context, _ = self.weather_attn(fut_flat, w_patches, enc_out)
         main = self.regressor(torch.cat([context, fut_flat], dim=1))
         return main + self.weather_bypass(fut_flat)
+
+
+def load_solar_model(path, num_features):
+    model = PatchTST_Weather_Model(num_features, pred_len=PRED_LEN, **SOLAR_HP).to(DEVICE)
+    model.load_state_dict(torch.load(path, map_location=DEVICE))
+    return model.eval()
 """)
 
 # ── 7. Loss ───────────────────────────────────────────────────────────────
@@ -358,7 +444,7 @@ class DaylightWeightedMSELoss(nn.Module):
         self.overpredict_penalty = overpredict_penalty
         self.mse = nn.MSELoss(reduction='none')
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, sample_weight=None):
         mask = (target > 0) | (pred > self.threshold)
         if mask.sum() == 0:
             return torch.tensor(0.0, requires_grad=True, device=pred.device)
@@ -367,39 +453,21 @@ class DaylightWeightedMSELoss(nn.Module):
         cloudy = (target > self.threshold) & (target <= self.low_util_cutoff)
         w[cloudy] = self.high_weight
         w[cloudy & (pred > target)] = self.high_weight * self.overpredict_penalty
+        if sample_weight is not None:              # 최근 표본 가중치 (RECENCY_HALF_LIFE_YEARS)
+            w = w * sample_weight.to(pred.device).float().unsqueeze(1)
         return (loss_all * w)[mask].mean()
 """)
 
-# ── 8. 분할 + 학습 유틸 ───────────────────────────────────────────────────
+# ── 8. 학습·평가 유틸 ─────────────────────────────────────────────────────
 code(r"""
-def prepare_split(df, features, future_features, target_col):
-    # train/val/test 분할 + 스케일러(train 에만 fit). 부호비교라 정렬·중복에 안전.
-    idx = df.index
-    tr = df[idx <= TRAIN_END].copy()
-    va = df[(idx > TRAIN_END) & (idx <= VAL_END)].copy()
-    te = df[(idx > VAL_END) & (idx <= TEST_END)].copy()
-    for nm, part in [('train', tr), ('val', va), ('test', te)]:
-        if len(part) == 0:
-            raise ValueError(f'[prepare_split] {nm} 0행! 업로드 CSV 범위를 확인할 것.')
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    tr[future_features] = scaler.fit_transform(tr[future_features])
-    va[future_features] = scaler.transform(va[future_features])
-    te[future_features] = scaler.transform(te[future_features])
-    fidx = [features.index(c) for c in future_features]
-    tidx = features.index(target_col)
-    return (tr[features].values, va[features].values, te[features].values,
-            scaler, fidx, tidx)
-
-
-def train_model(name, train_arr, val_arr, fidx, tidx, hp, criterion,
-                save_path, offset, epochs=EPOCHS, patience=PATIENCE):
-    num_features = len(fidx) + 1
+def train_model(name, train_arr, val_arr, hp, criterion, save_path, offset,
+                epochs=EPOCHS, patience=PATIENCE, verbose=True):
+    tr_ds = PatchTSTDatasetH(train_arr, hp['seq_len'], PRED_LEN, offset=offset)
+    va_ds = PatchTSTDatasetH(val_arr,   hp['seq_len'], PRED_LEN, offset=offset)
+    num_features = len(tr_ds.past_idx) + 1
     model = PatchTST_Weather_Model(num_features, pred_len=PRED_LEN, **hp).to(DEVICE)
     opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-5)
     sch = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
-
-    tr_ds = PatchTSTDatasetH(train_arr, hp['seq_len'], PRED_LEN, fidx, tidx, offset=offset)
-    va_ds = PatchTSTDatasetH(val_arr,   hp['seq_len'], PRED_LEN, fidx, tidx, offset=offset)
     tr_ld = DataLoader(tr_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     va_ld = DataLoader(va_ds, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -410,7 +478,7 @@ def train_model(name, train_arr, val_arr, fidx, tidx, hp, criterion,
         model.train(); tl = 0.0
         for b in tqdm(tr_ld, desc=f'{name} ep{ep}', leave=False):
             opt.zero_grad()
-            loss = criterion(model(b), b['future_y'].to(DEVICE))
+            loss = criterion(model(b), b['future_y'].to(DEVICE), b['sample_weight'])
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); tl += loss.item()
@@ -420,41 +488,87 @@ def train_model(name, train_arr, val_arr, fidx, tidx, hp, criterion,
                 vl += criterion(model(b), b['future_y'].to(DEVICE)).item()
         tl /= len(tr_ld); vl /= len(va_ld)
         sch.step(vl)
-        print(f'  ep{ep:03d} train={tl:.5f} val={vl:.5f} lr={opt.param_groups[0]["lr"]:.6f}')
+        if verbose:
+            print(f'  ep{ep:03d} train={tl:.5f} val={vl:.5f} lr={opt.param_groups[0]["lr"]:.6f}')
         if vl < best:
             best = vl; bad = 0
             torch.save(model.state_dict(), save_path)
-            print(f'    * saved (val={best:.5f})')
+            if verbose:
+                print(f'    * saved (val={best:.5f})')
         else:
             bad += 1
             if bad >= patience:
-                print(f'  early stop @ ep{ep}'); break
+                if verbose:
+                    print(f'  early stop @ ep{ep}')
+                break
     print(f'== {name} done. best val={best:.5f}  {(time.time()-started)/60:.1f}분 -> {save_path}')
-    return model, best
+    # ★저장된 best 에폭 가중치를 돌려준다 (마지막 에폭 모델로 평가하지 않도록)
+    return load_solar_model(save_path, num_features), best
 
 
 @torch.no_grad()
-def eval_mae(model, arr, fidx, tidx, seq_len, offset):
+def predict_windows(model, arr, offset):
+    # test 구간 · 서빙과 같은 00시 시작 윈도우만. 반환 (예측, 실측, 낮 여부) — 각 (윈도우수, 24)
     model.eval()
-    ds = PatchTSTDatasetH(arr, seq_len, PRED_LEN, fidx, tidx, offset=offset)
-    ld = DataLoader(ds, batch_size=256, shuffle=False)
-    P, A = [], []
-    for b in ld:
-        P.append(model(b).cpu().numpy()); A.append(b['future_y'].numpy())
-    return mean_absolute_error(np.concatenate(A).ravel(), np.concatenate(P).ravel())
+    ds = PatchTSTDatasetH(arr, SOLAR_HP['seq_len'], PRED_LEN, offset=offset,
+                          start_hours=SERVING_START_HOURS, future_start_min=VAL_END)
+    preds, actuals, daytime = [], [], []
+    for b in DataLoader(ds, batch_size=64, shuffle=False):
+        preds.append(model(b).clamp(0, 1).cpu().numpy())
+        actuals.append(b['future_y'].numpy())
+        daytime.append(np.stack([arr['is_daytime'][s: s + PRED_LEN] for s in b['future_start'].numpy()]))
+    return np.concatenate(preds), np.concatenate(actuals), np.concatenate(daytime)
+
+
+def summarize(pred, actual, daytime):
+    # 낮 시간만. 맑음 = 실측 이용률 > 0.6, 흐림 = 실측 <= 0.25. 편향 = 예측 - 실측.
+    p, a = pred[daytime], actual[daytime]
+    clear, cloudy = a > CLEAR_UTIL, a <= CLOUDY_UTIL
+    return {'일수': len(pred), 'MAE': np.abs(p - a).mean(), '편향': (p - a).mean(),
+            '맑음편향': (p - a)[clear].mean(), '흐림편향': (p - a)[cloudy].mean(),
+            '과대율': (p > a).mean()}
+
+
+def on_common_dates(*arrays):
+    # 비교하는 모델들이 같은 날짜로 평가되도록 결측 표시를 합친다 (입력 출처가 달라 결측 위치가 다르다)
+    past_bad = np.logical_or.reduce([a['past_bad'] for a in arrays])
+    future_bad = np.logical_or.reduce([a['future_bad'] for a in arrays])
+    return [{**a, 'past_bad': past_bad, 'future_bad': future_bad} for a in arrays]
+
+
+def eval_frame(df):
+    # 평가용 프레임: test 첫날도 과거 336h + offset 이 필요하므로 val 끝부분부터 붙여 둔다
+    context_hours = SOLAR_HP['seq_len'] + max(HORIZONS_ALL.values()) + PRED_LEN
+    return df[(df.index > pd.Timestamp(VAL_END) - pd.Timedelta(hours=context_hours)) & (df.index <= TEST_END)]
+
+
+def recency_weights(train_part, half_life_years):
+    # 손실 가중치 = 0.5^(train 끝에서 지난 연수 / 반감기), 평균 1 로 맞춘다. val·test 는 가중치 없음.
+    age_years = np.asarray((pd.Timestamp(TRAIN_END) - train_part.index).days) / 365.25
+    weight = 0.5 ** (age_years / half_life_years)
+    return (weight / weight.mean()).astype(np.float32)
 """)
 
-# ── 9. D+1~D+5 학습 ───────────────────────────────────────────────────────
+# ── 9. 학습 ───────────────────────────────────────────────────────────────
 code(r"""
 # ==========================================================================
-# solar D+1 ~ D+5 학습 — 스케일러는 지평 무관이라 한 번만 만들어 공유한다
+# 학습 — 스케일러는 지평 무관이라 한 번만 만들어 공유한다 (과거+미래 풀링, train 구간)
 # ==========================================================================
-s_tr, s_va, s_te, scaler_solar, s_fidx, s_tidx = prepare_split(
-    df, features_solar, future_features_solar, 'Solar_Utilization')
+train_part = df[df.index <= TRAIN_END]
+val_part = df[(df.index > TRAIN_END) & (df.index <= VAL_END)]
+scaler_solar = fit_pooled_scaler(train_part, future_features_solar)
 joblib.dump(scaler_solar, f'{OUT_DIR}/MinMax_scaler_solar.pkl')
-print('saved MinMax_scaler_solar.pkl  (D+1~D+5 공용)\n')
+print('saved MinMax_scaler_solar.pkl | 열 이름:', list(scaler_solar.feature_names_in_))
 
-results = {}
+train_arr = build_array(train_part, future_features_solar, scaler_solar, FUTURE_SUFFIX)
+val_arr = build_array(val_part, future_features_solar, scaler_solar, FUTURE_SUFFIX)
+if RECENCY_HALF_LIFE_YEARS:
+    train_arr['sample_weight'] = recency_weights(train_part, RECENCY_HALF_LIFE_YEARS)
+    print(f'최근 표본 가중치: 반감기 {RECENCY_HALF_LIFE_YEARS}년, '
+          f'가장 오래된 표본 {train_arr["sample_weight"][0]:.2f} / 최근 {train_arr["sample_weight"][-1]:.2f}')
+test_arr = build_array(eval_frame(df), future_features_solar, scaler_solar, FUTURE_SUFFIX)
+
+models, results = {}, {}
 all_started = time.time()
 for hname, off in HORIZONS.items():
     # D+1 만 파일명이 다르다 — 서빙이 D+1 을 models/solarwind_patchtst/ 에서 찾는다
@@ -463,20 +577,77 @@ for hname, off in HORIZONS.items():
     print('=' * 70)
     print(f'HORIZON {hname} (offset {off}h) -> {fname}')
     model, best = train_model(
-        f'SOLAR_{hname}', s_tr, s_va, s_fidx, s_tidx, SOLAR_HP,
+        f'SOLAR_{hname}', train_arr, val_arr, SOLAR_HP,
         criterion=DaylightWeightedMSELoss(threshold=0.01, low_util_cutoff=0.25,
-                                          high_weight=3.0, overpredict_penalty=1.5),
+                                          high_weight=LOSS_CLOUDY_WEIGHT,
+                                          overpredict_penalty=LOSS_OVERPREDICT_PENALTY),
         save_path=f'{OUT_DIR}/{fname}', offset=off)
-    mae = eval_mae(model, s_te, s_fidx, s_tidx, SOLAR_HP['seq_len'], off)
-    results[hname] = dict(val_loss=best, test_mae=mae, file=fname)
-    print(f'   {hname} test util MAE = {mae:.4f}')
+    models[hname] = model
+    results[hname] = dict(val_loss=best, **summarize(*predict_windows(model, test_arr, off)), file=fname)
 
 print('\n' + '=' * 70)
-print(f'전체 {(time.time()-all_started)/60:.1f}분')
+print(f'전체 {(time.time()-all_started)/60:.1f}분  (test 지표는 미래 = _fut 기준)')
 print(pd.DataFrame(results).T.to_string())
 """)
 
-# ── 10. metadata + 패키징 ─────────────────────────────────────────────────
+# ── 10. 평가 ① 현행 서빙 모델과 비교 ──────────────────────────────────────
+code(r"""
+# ==========================================================================
+# 평가 ① — 새 D+1 vs 현행 서빙 D+1 (test 구간, 같은 날짜)
+#   각 모델이 서빙에서 실제로 받을 입력을 넣는다:
+#     새 모델  = JMA 운량 + KIMG 일사·강수 (_fut)
+#     현행 모델 = KIMG 운량·중하층운량·일사·강수 (_kimg)
+#   ⚠서빙 후처리(tcog·일 스케일링·야간 마스크) 전의 모델 출력끼리 비교한다.
+# ==========================================================================
+test_frame = eval_frame(df)
+has_old_model = os.path.exists(f'{OLD_MODEL_DIR}/metadata.pkl')
+if has_old_model:
+    old_metadata = joblib.load(f'{OLD_MODEL_DIR}/metadata.pkl')
+    old_scaler = joblib.load(f'{OLD_MODEL_DIR}/MinMax_scaler_solar.pkl')
+    old_names = old_metadata['future_features_solar']
+    print('현행 서빙 피처:', old_names)
+else:
+    print(f'{OLD_MODEL_DIR} 없음 — 현행 모델 비교 행은 생략한다')
+
+if has_old_model:
+    old_model_d1 = load_solar_model(f'{OLD_MODEL_DIR}/best_patchtst_solar_model.pth',
+                                    len(old_metadata['features_solar']))
+    new_arr, old_arr = on_common_dates(
+        test_arr, build_array(test_frame, old_names, old_scaler, OLD_MODEL_SUFFIX))
+    compare = {'새 모델 D+1': summarize(*predict_windows(models['D1'], new_arr, 0)),
+               '현행 서빙 D+1': summarize(*predict_windows(old_model_d1, old_arr, 0))}
+else:
+    compare = {'새 모델 D+1': summarize(*predict_windows(models['D1'], test_arr, 0))}
+print(pd.DataFrame(compare).T.round(4).to_string())
+""")
+
+# ── 11. 평가 ② D+1 가중치 재사용 ─────────────────────────────────────────
+code(r"""
+# ==========================================================================
+# 평가 ② — D+1 가중치를 D+2 에 그대로 쓰면? (사용자 가설 검증)
+#   새 모델 입력 = JMA 운량 D+2 + KIMG 12z D+2 일사·강수 (_fut_d2), 현행 = KIMG 12z D+2 (_kimg_d2).
+#   과거 윈도우는 origin(전일 23시)에서 끝난다 — 대상일과 하루가 벌어진다.
+#   ⚠D+1 모델은 "과거 끝 바로 다음 24h" 만 배웠다 — persistence 에 기대고 있으면 여기서 깨진다(③ 참고).
+#   ⚠JMA 운량 예보(previous run)가 D+2 까지뿐이라 D+3~D+5 는 이 노트북에서 평가할 수 없다.
+# ==========================================================================
+reuse_rows = {}
+for n in EVAL_REUSE_HORIZONS:
+    offset = 24 * (n - 1)
+    arrays = {'새 D+1 가중치 재사용': (models['D1'],
+              build_array(test_frame, future_features_solar, scaler_solar, f'{FUTURE_SUFFIX}_d{n}'))}
+    if f'D{n}' in models:
+        arrays['새 offset 학습'] = (models[f'D{n}'], arrays['새 D+1 가중치 재사용'][1])
+    old_path = f'{OLD_MODEL_DIR}/best_patchtst_solar_model_D{n}.pth'
+    if has_old_model and os.path.exists(old_path):
+        arrays['현행 서빙'] = (load_solar_model(old_path, len(old_metadata['features_solar'])),
+                             build_array(test_frame, old_names, old_scaler, f'{OLD_MODEL_SUFFIX}_d{n}'))
+    aligned = on_common_dates(*[arr for _, arr in arrays.values()])
+    for (label, (model, _)), arr in zip(arrays.items(), aligned):
+        reuse_rows[f'D+{n} {label}'] = summarize(*predict_windows(model, arr, offset))
+print(pd.DataFrame(reuse_rows).T.round(4).to_string())
+""")
+
+# ── 12. metadata + 패키징 ─────────────────────────────────────────────────
 code(r"""
 # ==========================================================================
 # metadata.pkl — 서빙 forecasting/patchtst.load_assets 가 읽는 키 구성
@@ -493,7 +664,11 @@ metadata = {
     'solar_stations': SOLAR_STATIONS,
     'wind_stations':  WIND_STATIONS,
     # 이번 재학습 기록 (서빙은 안 읽지만 추적용)
-    'retrained': '2026-08-25 solar D+1~D+5 (+Year_sin/cos, val=4계절 재분할 / wind 미학습 — LGBM 담당)',
+    'retrained': '2026-10-02 solar (미래 입력: 운량=JMA, 일사·강수=KIMG(과거 JMA 월별QM) / 피처 6개: 일사·운량+Hour / '
+                 '07-30 학습창 / wind 미학습)',
+    'future_cloud_source': 'JMA',
+    'loss_weights': {'cloudy': LOSS_CLOUDY_WEIGHT, 'overpredict': LOSS_OVERPREDICT_PENALTY},   # ★서빙은 운량을 JMA 예보에서 읽어야 한다
+    'recency_half_life_years': RECENCY_HALF_LIFE_YEARS,
     'train': f'<={TRAIN_END}', 'val': f'~{VAL_END}', 'test': f'~{TEST_END}',
     'horizons_solar': HORIZONS,
 }
@@ -501,49 +676,98 @@ joblib.dump(metadata, f'{OUT_DIR}/metadata.pkl')
 print('saved metadata.pkl | solar num_features =', len(features_solar))
 
 import shutil
-shutil.make_archive('/content/solar_d1d5', 'zip', OUT_DIR)
+shutil.make_archive('/content/solar_retrain', 'zip', OUT_DIR)
 print('\n산출물:')
 for f in sorted(os.listdir(OUT_DIR)):
     print('  ', f, f'{os.path.getsize(os.path.join(OUT_DIR,f))/1e6:.1f}MB')
-print('\nzip -> /content/solar_d1d5.zip')
+print('\nzip -> /content/solar_retrain.zip')
 try:
     from google.colab import files
-    files.download('/content/solar_d1d5.zip')
+    files.download('/content/solar_retrain.zip')
 except Exception as e:
-    print('자동 다운로드 실패 — 좌측 파일창에서 solar_d1d5.zip 을 직접 내려받을 것:', e)
+    print('자동 다운로드 실패 — 좌측 파일창에서 solar_retrain.zip 을 직접 내려받을 것:', e)
 """)
 
-# ── 11. 반입 안내 ─────────────────────────────────────────────────────────
+# ── 13. 평가 ③ permutation importance ────────────────────────────────────
+code(r"""
+# ==========================================================================
+# 평가 ③ — Permutation importance (확인용, 새 D+1 모델, test 구간 낮 시간 MAE)
+#   미래 피처는 하나씩, 24h 시퀀스를 통째로 다른 날과 맞바꾼다(하루 안의 시간 구조는 유지).
+#   과거 이용률·과거 기상은 한 묶음씩 섞어 persistence 의존도를 본다.
+#   ⚠평가 윈도우가 전부 00시 시작이라 미래 Hour_sin/cos 는 모든 날이 같다 → 섞어도 0 이 정상.
+# ==========================================================================
+REPEATS = 3
+importance_dataset = PatchTSTDatasetH(test_arr, SOLAR_HP['seq_len'], PRED_LEN, offset=0,
+                                      start_hours=SERVING_START_HOURS, future_start_min=VAL_END)
+samples = [importance_dataset[i] for i in range(len(importance_dataset))]
+full_batch = {k: torch.stack([s[k] for s in samples])
+              for k in ['past_numeric', 'past_y', 'future_numeric', 'future_y']}
+importance_daytime = np.stack([test_arr['is_daytime'][s['future_start']: s['future_start'] + PRED_LEN]
+                               for s in samples])
+
+
+@torch.no_grad()
+def daytime_mae(model, batch):
+    pred = model(batch).clamp(0, 1).cpu().numpy()
+    return np.abs(pred - batch['future_y'].numpy())[importance_daytime].mean()
+
+
+model_d1 = models['D1'].eval()
+baseline_mae = daytime_mae(model_d1, full_batch)
+n_features = len(future_features_solar)
+groups = [(f'미래 {name}', 'future_numeric', [j]) for j, name in enumerate(future_features_solar)]
+groups += [('과거 이용률(past_y) 전체', 'past_y', [0]),
+           ('과거 기상 전체', 'past_numeric', list(range(n_features)))]
+
+rng = np.random.default_rng(0)
+rows = []
+for label, key, columns in groups:
+    increases = []
+    for _ in range(REPEATS):
+        order = torch.from_numpy(rng.permutation(len(samples)))
+        shuffled = full_batch[key].clone()
+        shuffled[:, :, columns] = full_batch[key][order][:, :, columns]
+        increases.append(daytime_mae(model_d1, {**full_batch, key: shuffled}) - baseline_mae)
+    rows.append({'피처': label, 'MAE 증가': np.mean(increases), '표준편차': np.std(increases)})
+
+importance = pd.DataFrame(rows).sort_values('MAE 증가', ascending=False).reset_index(drop=True)
+scale = max(importance['MAE 증가'].max(), 1e-9)
+importance['막대'] = importance['MAE 증가'].clip(lower=0).map(lambda v: '█' * int(round(30 * v / scale)))
+print(f'기준 낮시간 MAE = {baseline_mae:.4f}  ({len(samples)}일, {REPEATS}회 반복)')
+print(importance.round(4).to_string(index=False))
+""")
+
+# ── 14. 반입 안내 ─────────────────────────────────────────────────────────
 md(r"""
-## 반입 (로컬에서)
+## 반입 (로컬에서) — ① ② 결과를 보고 결정한 뒤에
 
-`solar_d1d5.zip` 을 풀고 **7개 파일을 한 번에** 옮긴다. 일부만 옮기면 스케일러가 어긋난다.
+**먼저 현행 가중치를 백업한다** (08-25 에 백업 없이 되돌려 신 가중치를 잃은 전례).
 
+`solar_retrain.zip` 의 D+1 세트를 **한 번에** 옮긴다:
 ```
 models/solarwind_patchtst/
-    best_patchtst_solar_model.pth      (D+1)
-    MinMax_scaler_solar.pkl
-    metadata.pkl
-models/solarwind_patchtst_horizon/
-    best_patchtst_solar_model_D2.pth
-    best_patchtst_solar_model_D3.pth
-    best_patchtst_solar_model_D4.pth
-    best_patchtst_solar_model_D5.pth
+    best_patchtst_solar_model.pth   MinMax_scaler_solar.pkl   metadata.pkl
 ```
 
-`MinMax_scaler_wind.pkl` 과 `best_patchtst_wind_model.pth` 는 **건드리지 않는다**
-(wind 는 재학습하지 않았다).
+### ⚠ 반입 전제: 서빙이 JMA 운량 예보를 받아야 한다
+새 모델은 운량을 JMA 로 배웠다. 지금 서빙(`forecast` 테이블)의 운량은 KIMG 다 —
+**JMA 운량 예보 수집·서빙 경로를 먼저 만들기 전에는 반입하지 않는다.**
 
-### 함께 필요한 코드 수정
-`forecasting/serve_solarwind.py` 의 `SOLAR_PT_HORIZONS = [2,3,4,5,6,7]` 을 `[2,3,4,5]` 로
-줄인다. D+6·D+7 가중치는 이번에 만들지 않았고, 남아 있는 옛 파일은 **옛 스케일러 기준**이라
-새 스케일러와 섞이면 안 된다.
+### ⚠ D+2~D+5 를 반드시 같이 정한다 (사용자 확정: D+1 가중치로 D+1~D+3, D+4·D+5 는 LGBM)
+옛 `models/solarwind_patchtst_horizon/best_patchtst_solar_model_D{2..5}.pth` 는 옛 피처(10개) 기준이라
+새 metadata(6개)로 로드되지 않는다 — `serve_solarwind._assets()` 가 try 밖이라 서빙이 멈춘다.
+- 새 D+1 `.pth` 를 `best_patchtst_solar_model_D2.pth`·`_D3.pth` 이름으로 복사.
+- `serve_solarwind.SOLAR_PT_HORIZONS = [2, 3]` (D+4·D+5 는 LGBM 폴백). 옛 D4·D5 파일은 백업 폴더로.
+
+`MinMax_scaler_wind.pkl` · `best_patchtst_wind_model.pth` 는 건드리지 않는다.
+
+남은 서빙 수정은 운량 출처(JMA)뿐.
 
 ### 검증
 ```bash
-python forecasting/serve_chain.py --utc 12 --no-write     # 120행 hd 1~5 나오는지
+python forecasting/serve_chain.py --utc 12 --no-write     # 120행 hd 1~5, solar 소스가 patchtst 인지
 ```
-그 다음 재학습 전후 정확도 비교(`est_horizon_jeju` 기준선 대조)를 돌린다.
+그 다음 구 모델을 복원해 같은 조건으로 재실행한 A/B 를 돌린다 (`est_horizon_jeju` 저장값으로 A/B 금지).
 """)
 
 

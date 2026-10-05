@@ -131,7 +131,7 @@ collectors/  ──▶  data/input_data_jeju.db  ──▶  forecasting/  ──
   (`collect_forecast` 도 이 SSOT 를 직접 부른다).
 - 수집 창 = `kma_kimg.window_bounds` (18z 는 `kma_kimg.SAMEDAY_18Z` opt-in).
 
-collectors/ 는 **9개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙: `collect_*` = 실행 단위(진입점),
+collectors/ 는 **10개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙: `collect_*` = 실행 단위(진입점),
 `kma_*` = 예보 fetch 어댑터, 나머지는 실측 fetch·변환·검증.
 **파일을 가르는 축은 출처가 아니라 예보냐 실측이냐다** — ASOS 는 KMA 소스지만 관측이라
 `kma_*` 가 아니라 `kpx_asos.py` 에 있다.
@@ -141,6 +141,7 @@ collectors/ 는 **9개**뿐이고 파일 = 역할 하나씩이다. 이름 규칙
 | `collect_historical.py` | KPX 수급·DA·RT SMP + ASOS → `historical` |
 | `collect_forecast.py` | KIMR+KIMG → `forecast_horizon` (fetch·병합·적재·CLI 한 파일) |
 | `collect_archive.py` | KIMR/KIMG 소스 분리 수집 → 메인 DB `forecast_kimr`/`forecast_kimg` |
+| `collect_jma.py` | JMA MSM 운량 예보(Open-Meteo single-runs, 12 UTC 실행) → 메인 DB `forecast_jma` (2026-10-02, 태양광 재학습 운량 소스) |
 | `kma_kimg.py` | KIMG(NE57) core + **KMA 공용 기반**(키 풀·세션 + 발표/창 산식 SSOT) |
 | `kma_kimr_nc.py` | KIMR(R030) std-NC / 등압면 CLDFRA — **KIMR 유일 경로** |
 | `kpx_asos.py` | KPX 수급·DA·RT SMP + KMA ASOS 관측 (실측 소스) |

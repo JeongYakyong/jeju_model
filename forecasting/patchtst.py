@@ -203,6 +203,26 @@ def _read_fore(con, start, end, cols):
     return df
 
 
+def read_jma_cloud(origin_day, start, end, stations):
+    """JMA 운량 예보(forecast_jma, 메인 DB) — 2026-10-02 태양광 재학습 모델의 미래 운량 입력.
+
+    origin_day(KST 날짜)의 12z base 와 같은 시각인 **그날 12 UTC 실행**을 쓴다. 그 실행이 없으면
+    (수집 대기 시간 초과로 최신 실행으로 대체된 날) 12 UTC 이전 실행 중 가장 최근 것을 시각별로 고른다.
+    12 UTC 보다 뒤 실행은 보지 않는다 — 백필해도 그 시점에 몰랐을 정보가 섞이지 않는다.
+    반환: timestamp 인덱스, total_cloud_{st} (0~1). 없는 시각은 빠진다.
+    """
+    run_limit = f'{pd.Timestamp(origin_day):%Y-%m-%d} 12:00:00'
+    cols = ', '.join(f'total_cloud_{st}' for st in stations)
+    with sqlite3.connect(DB_PATH) as con:
+        frame = pd.read_sql(
+            f'SELECT timestamp, {cols} FROM ('
+            f'  SELECT *, ROW_NUMBER() OVER (PARTITION BY timestamp ORDER BY run_time_utc DESC) rn'
+            f'  FROM forecast_jma WHERE run_time_utc <= ? AND timestamp BETWEEN ? AND ?'
+            f') WHERE rn = 1 ORDER BY timestamp', con, params=(run_limit, start, end),
+            parse_dates=['timestamp'])
+    return frame.set_index('timestamp')
+
+
 def _add_time_feats(df):
     df['Hour_sin'] = np.sin(2*np.pi*df.index.hour/24)
     df['Hour_cos'] = np.cos(2*np.pi*df.index.hour/24)

@@ -4,6 +4,192 @@
 
 ---
 
+## 2026-10-05 — 새 태양광 모델(JMA 운량) 로컬 적용·백필, 배포 준비
+
+### 사용자 결정 사항 (재질문 금지)
+- 학습 구성 단순화: 반감기 끔, Kt·강수감쇠 제거 → 피처 6개(지점별 일사·운량 + Hour).
+- 손실은 MSE(흐림 가중·과대 벌점 1.0/1.0) — 1차(3.0/1.5)는 맑은날을 더 낮게 잡았다.
+- D+1 가중치로 D+1~D+3, D+4·5 LGBM. 일사는 KIMG 유지(JMA 일사는 맑은날 과소가 더 큼).
+- 서버 성능 때문에 백필은 로컬에서 하고 바뀐 행만 서버로 옮긴다.
+
+### 한 것
+- `collectors/collect_jma.py` → `forecast_jma` (12 UTC 실행, 게시 지연 3.5h ≈ 00:30 KST, 최대 55분 대기·최신 실행 대체).
+  파이프라인 `jma` 단계 + `backfill5` 에 `jma_backfill`·`smp_backfill`.
+- 서빙: metadata `future_cloud_source=='JMA'` 일 때만 `patchtst.read_jma_cloud` 로 운량 교체.
+- 서빙 체인 test(119 base) 비교: KIMG ≥0.95 오판 밝은 시각 편향 −0.090→−0.054(D+1), 서빙 MAE D+1~3
+  0.067/0.071/0.087 → 0.063/0.066/0.080. 날짜별로는 진짜 맑은 날 크게 개선, 6월 초 연무 낀 밝은 날은 악화.
+  곡선 비교 페이지: https://claude.ai/artifact/XAJ4QmDU5TQE6ih8YQJnqD
+- 로컬 적용: 서버 DB 사본 위에 새 가중치 설치·백필, 배포 패키지·병합 스크립트(`deploy_jma_merge.py`) 시험 통과.
+
+### 발견
+- 서버 SMP 가 09-17 이후 멈춤 — 00:20 KMA 지연으로 D+2 부족 → SMP skip, 05:00 백필이 SMP 미재생성.
+- KPX `*_da`·실시간 SMP API 가 10-02 이후 0건(resultCode OK). `historical` 단계는 0행이어도 "성공".
+
+### 이월
+- 서버 적용(D단계). Model_api_added 00:40 동기화 시각 검토. `historical` 0행 경고 처리.
+
+---
+
+## 2026-10-02 (저녁) — 운량 JMA 전환 + 월별 QM 재구성
+
+### 사용자 결정 사항 (재질문 금지)
+- **KIMG 운량은 사용 부적절** — 학습·서빙 운량은 JMA. 중하층운량 제외. 일사·강수는 KIMG + JMA 월별 QM.
+- JMA previous run(2022-07~) 사용, 그 이전은 분석치. QM 은 월별.
+- 이상치 10회 미만은 무시.
+
+### 발견
+- JMA previous run 은 **전운량·일사·강수 D+1/D+2 가 2022-07-02~ 존재**(결측 0.3~1.4%). 비어 있는 건 층별운량과 D+3.
+- JMA 운량은 KIMG 와 반대로 **낮다**(KIMG 구간 낮 평균 ASOS 0.53 / JMA 0.34 / KIMG 0.61), ASOS 상관은 비슷(0.62 vs 0.61).
+- 강수 QM 은 0 이 겹친 분위수 때문에 0 을 양수로 바꿨다(겨울 +0.1~0.2mm/h) → 겹침 접기로 해결.
+- ★**ASOS 일사계 드리프트**: 4~6월 ASOS/위성 0.81(2020)→0.93(2026), JMA/위성은 0.86~0.89 안정 →
+  ASOS 쪽 변화. 과거 입력(ASOS 일사·Kt)의 연도별 스케일이 다르다. 보정 여부 미결.
+
+### 한 것
+- `fit_jma_monthly_qm.py` 신설(→ `processed/jma_future_{st}.csv`, `jma_monthly_qm.json`).
+- export `_fut`(JMA 운량+KIMG 일사·강수), `_fut_d2`, `_kimg`/`_kimg_d{n}`(현행 모델 비교용).
+- 노트북: midlow 제거(피처 10), 평가 ①② 를 같은 날짜·각자 서빙 입력으로, ② 는 D+2 만. 로컬 축소 실행 통과.
+
+### 이월
+- ASOS 드리프트 결정 → Colab. JMA 운량 서빙 수집 경로 신설(반입 전제).
+
+---
+
+## 2026-10-02 (오후) — 재학습 노트북 완성 (미래 입력 = 예보, +Kt)
+
+### 사용자 결정 사항 (재질문 금지)
+- previous run(D+1~3) 확보 불가 판정 → 목표 = D+1 정확도. JMA 는 향후 운량 보조·KMA 장애 백업·
+  KMA-JMA 예보차(변동성 신호)로도 검토 예정.
+- total_cloud 유지 + Kt 추가 / 07-30 구성 기준(Year 없음) / 서빙 Kt 코드 지금 추가.
+- 노트북 끝에 permutation importance 확인 셀.
+
+### 한 것
+- `export_solarwind_csv.py`: 실제 KIMG 구간을 freshest → **12z D+1** 로 (예: 09-15 10시 운량 —
+  freshest 는 18z 당일예보 0.00, D+1 은 0.15). 평가용 `_fut_d2~d5` 열 추가.
+- `patchtst._add_clearsky_index`(Haurwitz, 시각−30분, 고도<5°=0, clip 1.5) 신설, 서빙 두 경로에서 호출.
+  옛 가중치로 serve_chain 3 base × D+1~5 예측 **diff 0**. Kt 낮시간 중앙값 0.76, 이용률 상관 ASOS 0.67 / 예보 0.60.
+- `_gen_notebook_solar_d1d5.py` 재작성: 과거/미래 블록 분리, 풀링 스케일러, 결측 윈도우 skip,
+  best 에폭 평가(구: 마지막 에폭으로 평가하던 버그), 평가 ①②③. 로컬 축소 실행(1 에폭) 통과.
+
+### 이월
+- Colab 실행 → 반입 결정. ⚠D+1 만 반입하면 옛 D2~5 가 로드 실패로 서빙이 죽는다(노트북 반입 안내 참고).
+
+---
+
+## 2026-10-02 — JMA/KMA 비교로 train/serve skew 발견, 재훈련으로 방향 전환
+
+### 사용자 결정 사항 (재질문 금지)
+- **서빙시점 게이팅(09-27 갈래)을 보류하고 재훈련으로 전환**한다 — 운량 게이팅보다
+  더 근본적인 원인(아래)을 찾았기 때문.
+- **재훈련 피처: Kt(청천지수) 추가**, total_cloud 의존도 축소(midlow_cloud 중심).
+- **목표를 D+1 정확도로 좁힌다** — D+2~D+5는 "D+1 가중치 그대로 재사용 가능한지"부터
+  검증하고(과거 전면 재학습이었으나 수정), 안 되면 기존처럼 offset 학습.
+- **학습 미래 슬라이스는 QM(JMA historical→KIMG)로 보강**, 과거 슬라이스는 ASOS 유지.
+
+### 핵심 발견 — train/serve skew
+09-27 세션은 "KMA 운량 예보가 너무 높게 나온다"는 각도로 게이팅을 팠는데, 이번엔 사용자가
+가져온 JMA/Himawari(Open-Meteo) 보조자료로 더 깊이 들어가 **다른, 더 근본적인 원인**을 찾았다:
+
+- `forecasting/patchtst.py`/`_gen_notebook_solar_d1d5.py` 확인 결과, **PatchTST 학습은
+  "미래"(decoder) 슬라이스도 "과거"(encoder)와 똑같이 `historical`(ASOS 관측)에서
+  슬라이싱한다**(`PatchTSTDatasetH`가 past/future에 같은 `future_idx`를 재사용).
+  반면 **서빙은 과거=historical(ASOS)/미래=forecast_horizon(KIMG 예보)로 소스가 다르다.**
+  즉 학습은 "미래=실측"으로 배우고 서빙만 "미래=예보"를 먹는다 — 이게 과소예측의
+  핵심 원인으로 재규명됐다(09-27의 "운량이 너무 높다"는 증상 중 하나였을 뿐).
+- KMA vs JMA 예보 직접 비교(10개월 중복, `data/refdata/meteo_data/`): **운량 상관
+  0.4~0.5(약함)인데 일사는 0.77~0.91(강함)** — 운량이 모델 간에도 합의가 안 되는
+  근본적으로 약한 피처. Kt(일사 기반, 청천지수)가 더 신뢰할 신호라는 근거.
+
+### JMA/KMA 보조자료 (`data/refdata/meteo_data/`, `DATA_GUIDE.md` 지침 참고)
+- `jma_historical`(분석치, 2020~2026-09, 결측 0%) / `jma_previous_runs`(예보, 같은 기간,
+  **`cloud_cover_low/mid_previous_dayN`은 전구간 100% NaN** — Open-Meteo API 미제공,
+  층별운량 예보 QM에 못 씀, 그래서 historical 로 전환) / `kma_historical`(GDPS/LDPS,
+  UM계열 — **KIMG와 다른 모델**, west만 있음, 2025-02~2026-04) / `satellite`(Himawari
+  일사 관측, 2020~2026-09).
+- `fit_jma_kimg_qm.py` 신설 — JMA(historical) → KIMG(forecast_horizon, 10개월 중복구간)
+  분위수매핑. total_cloud/midlow_cloud/radiation/rainfall 전부 bias~0 으로 보정 확인
+  (상관은 원래 수준 유지 — QM은 분포만 맞추고 점별 일치는 못 만든다, 당연함).
+- **`forecast_horizon.rainfall_{west,south,east}`에 ~1310.7mm sentinel 발견** —
+  사용자는 "미차분 누적값 아니냐"고 의심했으나 실측 확인 결과 **거의 상수값
+  (1310.70~1310.75)이고 horizon_d·지점에 무작위 분포** — 차분 버그보다 **고정
+  sentinel/fill 패턴**(1310.7≈13107/10, 13107=0x3333)에 더 부합. ASOS쪽은 깨끗함
+  (최대 69~90mm, 현실적). 근본 원인(`collect_forecast` 강수 로직)은 미조사 — 다음
+  세션 후보.
+
+### 학습 CSV 확장
+- `export_solarwind_csv.py --with-future` 신설 — 과거(ASOS, 기존 컬럼 그대로) +
+  미래(`_fut` 접미사: 2020~2025-12-19=QM(JMA), 2025-12-20~=forecast_horizon 실제
+  KIMG freshest 1개/timestamp) 를 한 CSV(`solarwind_raw_jeju_trainserve.csv`)에 병합.
+  경계(2025-12-20) 전후 값 전환 확인함. git 미추적(로컬 생성물).
+
+### 이월 — 아직 구현 안 한 것
+- `_gen_notebook_solar_d1d5.py`: past_idx/future_idx 분리, Kt 양쪽 추가, 스케일러
+  변수별 과거+미래 풀링, D+1→D+n 재사용 평가셀. **다음 세션 시작점.**
+- `forecasting/patchtst.py`/`serve_solarwind.py`에 Kt 계산 추가 — 운영 중인 서빙
+  코드라 사용자 확인 대기(지금 할지, 새 가중치 나온 뒤 할지).
+- 09-27 운량 게이팅(부분풀링 등, `cloud_gate_v3_*.py`)은 폐기 아니라 **보류** —
+  재훈련이 기대만큼 안 되면 재검토 후보로 남겨둔다.
+
+### 기타
+- 로컬 dev DB 서버에서 재동기화(09-30 기준, 구버전 `data/input_data_jeju.db.bak_0907` 보관).
+- DECISIONS.md·PROGRESS.md·jejumodel.md 의 09-27분이 git 미커밋 상태였음(발견, 문제 아님 —
+  그 세션이 안 커밋하고 끝난 것). 이번 세션도 아직 커밋 요청 없었음.
+
+---
+
+## 2026-09-27 — 운량 게이팅 EDA (재훈련 대신 입력 보정으로 전환)
+
+### 사용자 결정 사항 (재질문 금지)
+- **old/new 병렬 서빙 인프라 계획을 중단한다** — 재훈련보다 운량 입력 자체를 바로잡는
+  게 먼저라고 판단. (계획서는 `~/.claude/plans/`에만 있고 프로젝트엔 커밋 안 됐음 —
+  다음 세션이 참고할 필요 없음.)
+- **운량 보정은 서빙 시점 재보정식으로, 검증만 하고 적용은 하지 않는다.**
+- 재훈련(Colab) 시 **D+1~D+3만 학습, D+4/D+5는 D+3 가중치 재사용**을 검토한다(경험적
+  으로 차이가 작다는 사용자 판단) — 아직 미실행.
+
+### 기각한 가설
+- **용량(capacity) 과소추정** — `real_solar_capacity_jeju`는 이미 실측 발전량의
+  running cummax(레거시 등록용량 기반 컬럼은 이미 제거됨). 옛 모델 DB
+  (`jeju_energy_nouse.db`)도 같은 cummax 방식이었다(피크 소수점까지 일치). **무혐의.**
+- **출력제한(curtailment)** — 태양광이 거의 100% 우선순위 급전이라 사용자가 기각
+  (2024-06 정책 변경은 train/val/test split 에 이미 반영돼 있음).
+
+### 핵심 — 운량 게이팅 EDA
+상세 = `Training/3_jeju_solarwind_forecaster/REPORT_cloud_gating_eda.md`,
+스크립트 = 같은 폴더 `training/cloud_recal_validate.py` / `cloud_gate_validate*.py`.
+
+실사례(2026-09-20/22) 진단으로 레이어(L/M/H) 실패가 두 유형임을 확인:
+**"허수형"**(H만 높고 L/M 낮음 → total 부풀려짐, 재가중으로 고쳐짐) vs
+**"진짜형"**(L 자체가 잘못 예보됨, 재가중으로 못 고침) — 재조합 공식이 반만 듣는 이유.
+
+월별 순환 홀드아웃(leave-one-month-out, 2025-12~2026-09, 10폴드) 60%+ 구간 편향:
+
+| 후보 | 평균 편향 |
+|---|---|
+| 현행(raw total_cloud) | −0.198 |
+| T+ML 선형 재보정 | −0.156 (연중 고름, 저위험) |
+| **일사×운량 교호작용(게이팅)** | **−0.107 (4~9월 크게 개선, 12~2월 악화)** |
+
+★**게이팅의 계절 정규화 시도는 실패** — 아카이브가 10개월뿐이라 겨울(12월/1월)이
+각 1회뿐이고, held-out 시 학습셋에 비교할 다른 해 같은 달이 없다. **데이터 구조적
+한계**(코드 문제 아님) — 겨울 데이터 1년 더 쌓인 뒤 재시도.
+⚠5월은 편향이 +0.04로 반전(과대예측) — 이 방향이 과소예측보다 위험(net_load 과소=
+발전준비 부족)하므로 배포 전 재확인 필요.
+
+### 기타
+- **서버에서 최신 DB를 받는 절차 확립** — 로컬 dev DB가 2026-09-07에 멈춰 있었다.
+  `scp -i ~/.ssh/gascast_deploy kimjourvanne@100.76.127.38:/home/kimjourvanne/jeju_model/data/input_data_jeju.db ...`
+- `solar_damping()`은 강수량 기반 exp decay이고 운량·일사와 무관 — 혼동 정정.
+- `low/mid/high_cloud_*` 원시값은 **2026-08-04부터만** DB에 있다(그 전은 층별 분해 불가).
+
+### 다음 세션
+1. 게이팅을 계절 제한(3~9월만 적용, 겨울은 현행 유지)해서 설계 구체화.
+2. 서빙 코드(`serve_solarwind.py`)에 넣을지, `solar_scale.json`처럼 별도 설정파일로
+   둘지 결정 — **아직 적용 안 함.**
+3. 5월 반전(과대예측 방향) 재확인.
+4. 겨울 아카이브 1년치 쌓이면 계절 정규화 게이팅 재시도.
+
+---
+
 ## 2026-09-07 — 사이트 접속 잠금 + CARTO 타일 API 키
 
 ### 사용자 결정 사항 (재질문 금지)

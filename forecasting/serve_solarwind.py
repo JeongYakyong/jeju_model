@@ -32,7 +32,9 @@ from forecasting import patchtst                             # PatchTST 모델·
 from forecasting import serve_solarwind_lgbm as lgbm_serve   # LGBM wind/capacity/demand/폴백
 
 PKL = P.DIR_MODELS_SOLARWIND_PATCHTST_HORIZON   # solar direct D+2~D+7 .pth 폴더
-SOLAR_PT_HORIZONS = [2, 3, 4, 5]            # direct 학습 지평 (D+1은 patchtst.py 가 로드)
+SOLAR_PT_HORIZONS = [2, 3]                  # PatchTST 지평 (D+1은 patchtst.py 가 로드)
+# 2026-10-05 재학습(미래 입력 = 예보, 운량 = JMA): D+1 가중치 하나를 D2·D3 파일로 복사해 재사용한다
+#   (사용자 확정 — JMA 12 UTC 실행이 78h 라 D+3 까지 운량이 있다). D+4·D+5 는 LGBM 폴백.
 # 2026-07-30 재학습: solar D+1~D+5 를 새 스케일러로 다시 학습 → 지평을 운영 상한(5일)에 맞췄다.
 # ★D+6·D+7 .pth 는 남아 있어도 **옛 스케일러 기준**이라 새 D+1~D+5 와 섞으면 안 된다.
 #   예보 수집도 --days 5 라 D+6/7 은 서빙 입력이 기후값 폴백뿐이었다.
@@ -211,7 +213,9 @@ def _apply_tcog(con, idx, su, wu, betas):
 # =============================================================================
 # SOLAR PatchTST direct — 발행 origin 기준 D+n 대상일 24h
 # =============================================================================
-def _build_solar_direct(con, origin, n, seq_len):
+def _build_solar_direct(con, origin, n, seq_len, cloud_source='KIMG'):
+    """cloud_source = metadata 의 future_cloud_source. 'JMA' 면 미래 운량을 forecast_jma 에서 읽는다
+    (2026-10-02 재학습 모델 — KIMG 운량은 과대라 학습에 안 썼다). 없으면 옛 모델처럼 KIMG."""
     d = pd.Timestamp(origin).normalize() + pd.Timedelta(days=n)   # 대상일 00:00
     offset = (n - 1) * 24
     first = d - pd.Timedelta(hours=offset + seq_len)
@@ -231,6 +235,11 @@ def _build_solar_direct(con, origin, n, seq_len):
     past = patchtst._read_hist(con, s(first), s(last_past), hist_cols + [util_col])
     fore = patchtst._read_fore(con, s(d), s(fut_end), list(fore_map))
     fore = fore.apply(pd.to_numeric, errors='coerce').rename(columns=fore_map)
+    if cloud_source == 'JMA':
+        # 운량만 JMA 로 바꾼다 (일사·강수는 KIMG). JMA 가 비면 아래 결측 검사에 걸려 LGBM 폴백.
+        jma = patchtst.read_jma_cloud(origin, s(d), s(fut_end), patchtst.SOLAR_STATIONS)
+        for st in patchtst.SOLAR_STATIONS:
+            fore[f'total_cloud_{st}'] = jma[f'total_cloud_{st}'].reindex(fore.index)
     if len(past) < seq_len or past[util_col].isna().any():
         raise ValueError(f'past 부족/NaN ({len(past)}/{seq_len})')
     if len(fore) != PL or fore[hist_cols].isna().any().any():
@@ -252,7 +261,8 @@ def _solar_util(con, origin, n, assets):
     target_day = pd.Timestamp(origin).normalize() + pd.Timedelta(days=n)
     if n in solar_models:
         try:
-            combined, past_idx, fut_idx, past_util = _build_solar_direct(con, origin, n, md['SEQ_LEN_SOLAR'])
+            combined, past_idx, fut_idx, past_util = _build_solar_direct(
+                con, origin, n, md['SEQ_LEN_SOLAR'], md.get('future_cloud_source', 'KIMG'))
             util = patchtst._infer(solar_models[n], sc_solar, combined, past_idx, fut_idx, past_util,
                              md['future_features_solar'], 'Solar_Utilization', md['SEQ_LEN_SOLAR'], device)
             return util, 'patchtst'

@@ -59,6 +59,12 @@ PIPELINE_STEPS = [
     # 테이블에서 서빙 입력을 새로 만든다.  3h 결손 보간은 ② 와 공용(fill_short_gaps).
     ("weather", "②-2 KIMR/KIMG 소스 분리 수집 (12z 5일 1h → forecast_kimr/kimg)",
      P.COLLECT_ARCHIVE, []),
+    # JMA 운량 예보 (2026-10-02 — 태양광 재학습이 운량을 JMA 로 배움, KIMG 운량은 과대라 미사용).
+    # 12 UTC 실행만 78h 라 D+1~D+3 을 덮는데 Open-Meteo 게시가 ~00:30 KST 로 00:20 cron 보다 늦을 수
+    # 있어 최대 55분 기다린다(사용자 결정: 최대 60분, 단계 상한 3600s 안쪽으로). 끝내 없으면 최신 실행으로 대체.
+    # 체인 직전에 두어 앞 단계(KMA 수집) 시간만큼 대기가 겹친다.
+    ("jma", "②-3 JMA 운량 수집 (12 UTC 실행, 최대 55분 대기 → forecast_jma)", P.COLLECT_JMA,
+     ["--wait-minutes", "55"]),
     ("chain", "③ 예측 체인 (12z → est_horizon_jeju)", P.SERVE_CHAIN, ["--utc", "12"]),
     ("smp", "④ SMP 예측 (12z 전용 → est_smp_horizon_jeju)", P.SERVE_SMP, []),
     # ── 18z 라이트 (당일예보, cron ~08:00 KST — basetime 확정 설계 2026-07-17) ──
@@ -78,13 +84,19 @@ PIPELINE_STEPS = [
     # 평소엔 거의 비용이 없다 — 실제로 결손이 있을 때만 재수집이 일어난다.
     ("forecast_backfill", "②-백필 최근 5일 완결성 재확인(resume-skip)", P.COLLECT_FORECAST,
      ["--region", "jeju", "--backfill", "5"]),
+    # JMA 는 Open-Meteo 보관이 ~4.5개월뿐이라 놓친 날은 그 안에 다시 받아 둔다 (같은 실행은 행 교체).
+    ("jma_backfill", "②-3-백필 JMA 운량 최근 5일 12 UTC 실행", P.COLLECT_JMA, ["--backfill", "5"]),
     ("chain_backfill", "③-백필 예측 체인 재생성(최근 5일)", P.SERVE_CHAIN,
      ["--utc", "12", "--backfill", "5"]),
+    # SMP 는 순부하 예측(est_horizon_jeju D+1·D+2)을 입력으로 쓴다. 00:20 에 KMA 발표가 늦어 D+2 가
+    # 비면 SMP 가 "D+1·D+2 부족"으로 건너뛰는데, 05:00 백필이 체인만 채우고 SMP 는 안 다시 돌려
+    # 2026-09-17 이후 SMP 가 한 번도 안 나왔다(2026-10-05 발견). 체인 백필 뒤에 SMP 도 다시 만든다.
+    ("smp_backfill", "④-백필 SMP 재생성(최근 5일)", P.SERVE_SMP, ["--backfill", "5"]),
 ]
 STEP_GROUPS = {
     # all = 12z 풀 파이프라인 (명시 고정 — 18z 단계는 light18 그룹 전용)
-    "all": ["historical", "forecast", "weather", "chain", "smp"],
-    "collect": ["historical", "forecast", "weather"],
+    "all": ["historical", "forecast", "weather", "jma", "chain", "smp"],
+    "collect": ["historical", "forecast", "weather", "jma"],
     "predict": ["chain", "smp"],
     # 18z 라이트: historical 선행 필수 — 수요 서빙의 과거창 168h(전일 23시까지 실측)와
     # 태양광 서빙의 전일 이용률 실측이 있어야 당일예보(hd=0)가 나온다.
@@ -94,7 +106,7 @@ STEP_GROUPS = {
     # (21:00 KST) + 3시간 20분 시점이라 발표 파일 준비(경험상 3~5시간 소요)를 못 기다려
     # D+2~5 가 조용히 빠지는 사고가 반복 관측됨(쿼터·코드버그 아님, 그 시각 한정 문제).
     # 5일마다면 하루 결손이 최대 5일 방치될 수 있어 매일 재확인으로 바꿨다.
-    "backfill5": ["forecast_backfill", "chain_backfill"],
+    "backfill5": ["forecast_backfill", "jma_backfill", "chain_backfill", "smp_backfill"],
 }
 STEP_TIMEOUT_SECONDS = 3600   # 단계당 상한 — 예보 수집(KIMG 3지점)이 가장 오래 걸린다(~3분)
 
@@ -139,8 +151,8 @@ def main():
     parser.add_argument("--steps", default="all",
                         help="실행 단계 — all(12z 풀) / collect / predict / light18(18z 당일예보) "
                              "/ backfill5(최근 5일 결손 복구) / 단계키 나열 "
-                             "(historical,forecast,weather,chain,smp,"
-                             "forecast18,weather18,chain18,forecast_backfill,chain_backfill)")
+                             "(historical,forecast,weather,jma,chain,smp,"
+                             "forecast18,weather18,chain18,forecast_backfill,jma_backfill,chain_backfill,smp_backfill)")
     parsed = parser.parse_args()
     selected = _resolve_steps(parsed.steps)
 

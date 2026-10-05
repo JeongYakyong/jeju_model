@@ -51,6 +51,7 @@ REF_JEJU_ZONES    = os.path.join(REFDATA, 'jeju_zones_3.json')                 #
 COLLECT_HISTORICAL = os.path.join(DIR_COLLECTORS, 'collect_historical.py')      # 실측 수집
 COLLECT_FORECAST   = os.path.join(DIR_COLLECTORS, 'collect_forecast.py')   # 기상예보 수집 (--region jeju)
 COLLECT_ARCHIVE    = os.path.join(DIR_COLLECTORS, 'collect_archive.py')       # KIMR/KIMG 소스 분리 기상 아카이브 (메인 DB)
+COLLECT_JMA        = os.path.join(DIR_COLLECTORS, 'collect_jma.py')           # JMA MSM 운량 예보(Open-Meteo) → forecast_jma
 SERVE_CHAIN        = os.path.join(DIR_FORECASTING, 'serve_chain.py')           # 수요+신재생 → est_horizon_jeju
 SERVE_SMP          = os.path.join(DIR_FORECASTING, 'serve_smp.py')             # SMP → est_smp_horizon_jeju
 FIT_SOLAR_SCALE    = os.path.join(DIR_FORECASTING, 'fit_solar_scale.py')       # 태양광 일 스케일링 보정표 적합·점검
