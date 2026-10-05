@@ -25,8 +25,14 @@
 - 서버 SMP 가 09-17 이후 멈춤 — 00:20 KMA 지연으로 D+2 부족 → SMP skip, 05:00 백필이 SMP 미재생성.
 - KPX `*_da`·실시간 SMP API 가 10-02 이후 0건(resultCode OK). `historical` 단계는 0행이어도 "성공".
 
+### 서버 적용 (13:40~13:50)
+- 폴더 정리(nouse/, meteo_data 폴더째 제외) 후 d2db12f 커밋 → 사용자 push → 서버 DB 백업 → `git pull` →
+  패키지 병합 → `--steps jma`·`serve_chain --no-write` 정상, 서버·로컬 예측 합계 일치.
+- Model_api_added `sync_forecast` 01:10·01:40 추가(00:40·08:20 유지).
+- 사용자: SMP 는 중요하지 않음 — 수요·태양광·풍력만 챙긴다.
+
 ### 이월
-- 서버 적용(D단계). Model_api_added 00:40 동기화 시각 검토. `historical` 0행 경고 처리.
+- 00:20 실운영 첫 실행 확인(JMA 대기·12 UTC 실행 여부). `historical` 0행 경고 처리.
 
 ---
 
