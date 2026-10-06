@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-10-06 — 12z 갱신 정식/가교/마감 3방식 + 매시 repair cron
+
+### 사용자 결정 사항 (재질문 금지)
+- D+1 이 가장 중요, D+2~5 는 참고용. JMA 12 UTC 가 근본이고 06 UTC 는 가교일 뿐 — 정식 갱신 뒤 버린다
+  (예측 데이터가 쌓이면 활용이 어려워지고 시스템만 복잡해짐).
+- LGBM 은 최후: 다음 날 08:00 KST 까지 JMA 12 UTC 가 없을 때만 KMA+LGBM.
+- 정규 실행 00:30, 복구는 매시. 캡션에 예측 생성 시각과 태양광 모델 표시(Model_api_added).
+- KIMG 운량으로 JMA 결손을 메우지 않는다(평균 0.67 vs JMA 0.41, 과소예측 재발).
+
+### 한 것
+- `serve_chain.solar_mode_12z`: fresh(D+1~5) / bridge(D+1 만, 06 UTC 운량, LGBM 이면 안 씀) / deadline(08:00 뒤).
+  18z 도 전날 12z 날짜로 같은 판정. `est_horizon_jeju.solar_model` = patchtst / patchtst_bridge / lgbm.
+- `collect_jma`: 55분 대기·최신 실행 대체 제거, `--bridge`(06 UTC), 12 UTC 저장 시 같은 날 다른 실행 삭제.
+- `run_pipeline`: `backfill5` → `repair`(+`weather_backfill` 아카이브 최근 2 base), `jma_bridge` 단계.
+- cron: 00:30 정규 / 30 1-23 repair / 08:00 light18 / 23:00 jma_bridge, 전부 flock. 서버 배포 20:35.
+
+### 발견
+- 00:20 실행은 매일 KMA 12z D+1 만 있음(최근 20일 전부) — D+2~5 는 05:00 한 번에만 복구되던 구조.
+- 12z 아카이브가 재시도 없이 비어 있었음(forecast_kimr 09-24 이후 0, forecast_kimg base 당 11~68/120) — 최근 2 base 만 복구.
+- KMA 06z 한계: KIMG 87h, KIMR 72h → D+4·5 불가. Open-Meteo jma_msm 은 00/12 UTC 78h, 나머지 39h.
+
+### 이월
+- 실운영 확인: 23:00 가교 수집, 00:30 bridge → repair fresh 전환, 캡션 화면.
+
+---
+
 ## 2026-10-05 — 새 태양광 모델(JMA 운량) 로컬 적용·백필, 배포 준비
 
 ### 사용자 결정 사항 (재질문 금지)

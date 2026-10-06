@@ -10,8 +10,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 streamlit run app.py                      # 대시보드 (사이트 접속 잠금 → site_lock.json, 관리자 메뉴에서 on/off)
 
-python run_pipeline.py                    # 12z 풀: 실측→예보→KIM 아카이브→체인→SMP (cron 00:20 KST)
+python run_pipeline.py                    # 12z 풀: 실측→예보→KIM 아카이브→JMA→체인→SMP (cron 00:30 KST)
 python run_pipeline.py --steps light18    # 18z 당일예보 라이트 (cron 08:00 KST)
+python run_pipeline.py --steps repair     # 결손 복구 + JMA 12 UTC 도착 시 정식 갱신 (cron 매시 :30)
+python run_pipeline.py --steps jma_bridge # JMA 06 UTC 가교 실행 (cron 23:00 KST, README 'crontab 등록' 참고)
 python run_pipeline.py --steps collect    # 수집만 / predict = 예측만
 python run_pipeline.py --steps chain,smp  # 단계 키 나열도 가능
 
@@ -141,7 +143,7 @@ collectors/ 는 **10개**뿐이고 파일 = 역할 하나씩이다. 이름 규�
 | `collect_historical.py` | KPX 수급·DA·RT SMP + ASOS → `historical` |
 | `collect_forecast.py` | KIMR+KIMG → `forecast_horizon` (fetch·병합·적재·CLI 한 파일) |
 | `collect_archive.py` | KIMR/KIMG 소스 분리 수집 → 메인 DB `forecast_kimr`/`forecast_kimg` |
-| `collect_jma.py` | JMA MSM 운량 예보(Open-Meteo single-runs, 12 UTC 실행) → 메인 DB `forecast_jma` (2026-10-02, 태양광 재학습 운량 소스) |
+| `collect_jma.py` | JMA MSM 운량 예보(Open-Meteo single-runs, 12 UTC 실행 + `--bridge` 06 UTC 가교) → 메인 DB `forecast_jma` (2026-10-02, 태양광 재학습 운량 소스) |
 | `kma_kimg.py` | KIMG(NE57) core + **KMA 공용 기반**(키 풀·세션 + 발표/창 산식 SSOT) |
 | `kma_kimr_nc.py` | KIMR(R030) std-NC / 등압면 CLDFRA — **KIMR 유일 경로** |
 | `kpx_asos.py` | KPX 수급·DA·RT SMP + KMA ASOS 관측 (실측 소스) |
