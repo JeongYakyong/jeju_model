@@ -60,7 +60,7 @@ BRIDGE_DEADLINE_HOUR = 8
 
 
 def solar_mode_12z(base: str) -> str:
-    """12z base 의 갱신 방식 — 'fresh' / 'bridge' / 'deadline' (위 주석 참고)."""
+    """12z base(또는 그 날짜)의 갱신 방식 — 'fresh' / 'bridge' / 'deadline' (위 주석 참고)."""
     origin_day = pd.Timestamp(base).normalize()
     run_12utc = f'{origin_day:%Y-%m-%d} 12:00:00'
     with sqlite3.connect(DB) as con:
@@ -185,8 +185,10 @@ def build_base(base: str, sc, assets3) -> pd.DataFrame:
         else pd.Timestamp(base).normalize()
     origin_ts = origin_day + pd.Timedelta(hours=ORIGIN_HOUR)
     hz = HZ_18Z if m18 else HZ
-    mode = 'fresh' if m18 else solar_mode_12z(base)   # 18z 는 전날 12 UTC 운량을 쓴다 — 정식
-    if mode == 'bridge':
+    # 18z 도 운량은 전날 12 UTC 실행을 쓰므로 같은 규칙으로 판정한다 (origin_day = 그 12z base 날짜).
+    # bridge 면 LGBM 으로 떨어진 지평을 안 쓴다 — 안 그러면 freshest-wins 가 12z 가교 PatchTST 를 가린다.
+    mode = solar_mode_12z(origin_day.strftime('%Y-%m-%d %H:%M:%S'))
+    if mode == 'bridge' and not m18:
         hz = (1,)
     print(f'  base {base} 갱신 방식: {mode}')
     # 기상=forecast_horizon → 스크래치 주입.  18z 는 base 행이 당일 04시부터라 00~03시가
