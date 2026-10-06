@@ -16,9 +16,10 @@
 
 사용
 ----
-    python run_pipeline.py                     # 12z 풀 (①→④, cron 00:20 KST)
+    python run_pipeline.py                     # 12z 풀 (①→④, cron 00:30 KST)
     python run_pipeline.py --steps light18     # 18z 당일예보 라이트 (①→②′→②′-2→③′, cron ~08:00 KST)
-    python run_pipeline.py --steps backfill5   # 최근 5일 결손 자동 복구 (cron 매일 05:00 KST)
+    python run_pipeline.py --steps repair      # 결손 복구 + JMA 12 UTC 도착 시 정식 갱신 (cron 매시 :30)
+    python run_pipeline.py --steps jma_bridge  # JMA 06 UTC 가교 실행 수집 (cron 23:00 KST)
     python run_pipeline.py --steps collect     # 수집만 (①②)
     python run_pipeline.py --steps predict     # 예측만 (③④)
     python run_pipeline.py --steps historical,smp   # 단계 이름 나열도 가능
@@ -60,11 +61,10 @@ PIPELINE_STEPS = [
     ("weather", "②-2 KIMR/KIMG 소스 분리 수집 (12z 5일 1h → forecast_kimr/kimg)",
      P.COLLECT_ARCHIVE, []),
     # JMA 운량 예보 (2026-10-02 — 태양광 재학습이 운량을 JMA 로 배움, KIMG 운량은 과대라 미사용).
-    # 12 UTC 실행만 78h 라 D+1~D+3 을 덮는데 Open-Meteo 게시가 ~00:30 KST 로 00:20 cron 보다 늦을 수
-    # 있어 최대 55분 기다린다(사용자 결정: 최대 60분, 단계 상한 3600s 안쪽으로). 끝내 없으면 최신 실행으로 대체.
-    # 체인 직전에 두어 앞 단계(KMA 수집) 시간만큼 대기가 겹친다.
-    ("jma", "②-3 JMA 운량 수집 (12 UTC 실행, 최대 55분 대기 → forecast_jma)", P.COLLECT_JMA,
-     ["--wait-minutes", "55"]),
+    # 12 UTC 실행만 78h 라 D+1~D+3 을 덮는데 Open-Meteo 게시가 정규 실행보다 늦는 날이 많다.
+    # 2026-10-06 사용자 결정: 기다리지 않는다. 없으면 체인이 06 UTC 가교로 D+1 만 임시 예측하고,
+    # 매시 repair 가 12 UTC 를 다시 받아 D+1~5 를 정식 갱신한다 (serve_chain.solar_mode_12z).
+    ("jma", "②-3 JMA 운량 수집 (12 UTC 실행, 없으면 건너뜀 → forecast_jma)", P.COLLECT_JMA, []),
     ("chain", "③ 예측 체인 (12z → est_horizon_jeju)", P.SERVE_CHAIN, ["--utc", "12"]),
     ("smp", "④ SMP 예측 (12z 전용 → est_smp_horizon_jeju)", P.SERVE_SMP, []),
     # ── 18z 라이트 (당일예보, cron ~08:00 KST — basetime 확정 설계 2026-07-17) ──
@@ -84,6 +84,10 @@ PIPELINE_STEPS = [
     # 평소엔 거의 비용이 없다 — 실제로 결손이 있을 때만 재수집이 일어난다.
     ("forecast_backfill", "②-백필 최근 5일 완결성 재확인(resume-skip)", P.COLLECT_FORECAST,
      ["--region", "jeju", "--backfill", "5"]),
+    # KIMR/KIMG 아카이브(재학습용)도 00:30 에는 KMA 파일이 아직 없어 늘 비어 있었다(2026-10-06 발견).
+    # 최근 2개 base 만 다시 시도 — 이미 찬 base 는 호출 없이 건너뛰므로 매시 돌려도 쿼터 부담이 작다.
+    ("weather_backfill", "②-2-백필 KIMR/KIMG 아카이브 최근 2개 base(resume-skip)", P.COLLECT_ARCHIVE,
+     ["--backfill", "2"]),
     # JMA 는 Open-Meteo 보관이 ~4.5개월뿐이라 놓친 날은 그 안에 다시 받아 둔다 (같은 실행은 행 교체).
     ("jma_backfill", "②-3-백필 JMA 운량 최근 5일 12 UTC 실행", P.COLLECT_JMA, ["--backfill", "5"]),
     ("chain_backfill", "③-백필 예측 체인 재생성(최근 5일)", P.SERVE_CHAIN,
@@ -92,6 +96,9 @@ PIPELINE_STEPS = [
     # 비면 SMP 가 "D+1·D+2 부족"으로 건너뛰는데, 05:00 백필이 체인만 채우고 SMP 는 안 다시 돌려
     # 2026-09-17 이후 SMP 가 한 번도 안 나왔다(2026-10-05 발견). 체인 백필 뒤에 SMP 도 다시 만든다.
     ("smp_backfill", "④-백필 SMP 재생성(최근 5일)", P.SERVE_SMP, ["--backfill", "5"]),
+    # JMA 06 UTC 실행 (39h, D+1 을 덮음) — 12 UTC 가 늦는 동안 D+1 임시 예측용 가교. cron 23:00 KST.
+    ("jma_bridge", "JMA 06 UTC 가교 실행 수집 (D+1 임시 예측용 → forecast_jma)", P.COLLECT_JMA,
+     ["--bridge"]),
 ]
 STEP_GROUPS = {
     # all = 12z 풀 파이프라인 (명시 고정 — 18z 단계는 light18 그룹 전용)
@@ -101,12 +108,11 @@ STEP_GROUPS = {
     # 18z 라이트: historical 선행 필수 — 수요 서빙의 과거창 168h(전일 23시까지 실측)와
     # 태양광 서빙의 전일 이용률 실측이 있어야 당일예보(hd=0)가 나온다.
     "light18": ["historical", "forecast18", "weather18", "chain18"],
-    # 매일 05:00 KST cron — 최근 5일 결손을 자동 복구(정상이면 거의 무비용).
-    # 2026-09-18 도입 땐 5일마다였다가, 2026-09-22 매일로 변경 — 00:20 이 KMA 12z 발표
-    # (21:00 KST) + 3시간 20분 시점이라 발표 파일 준비(경험상 3~5시간 소요)를 못 기다려
-    # D+2~5 가 조용히 빠지는 사고가 반복 관측됨(쿼터·코드버그 아님, 그 시각 한정 문제).
-    # 5일마다면 하루 결손이 최대 5일 방치될 수 있어 매일 재확인으로 바꿨다.
-    "backfill5": ["forecast_backfill", "jma_backfill", "chain_backfill", "smp_backfill"],
+    # 매시 :30 cron (00:30 정규 실행 제외) — 결손 복구 + JMA 12 UTC 가 오면 정식 갱신.
+    # 00:30 은 KMA 12z 발표(21:00 KST) 파일 준비(경험상 3~5시간)를 못 기다려 D+2~5 가 자주 빠진다.
+    # 예전엔 05:00 하루 한 번(backfill5)만 다시 시도해 화면 반영이 늦었다 → 2026-10-06 매시로 변경.
+    # 다 채워진 뒤에는 각 단계가 호출 없이 건너뛰어 1~2분이면 끝난다.
+    "repair": ["forecast_backfill", "weather_backfill", "jma_backfill", "chain_backfill", "smp_backfill"],
 }
 STEP_TIMEOUT_SECONDS = 3600   # 단계당 상한 — 예보 수집(KIMG 3지점)이 가장 오래 걸린다(~3분)
 
@@ -150,9 +156,9 @@ def main():
     parser = argparse.ArgumentParser(description="제주 수집→예측 파이프라인 (cron·관리자 공용)")
     parser.add_argument("--steps", default="all",
                         help="실행 단계 — all(12z 풀) / collect / predict / light18(18z 당일예보) "
-                             "/ backfill5(최근 5일 결손 복구) / 단계키 나열 "
-                             "(historical,forecast,weather,jma,chain,smp,"
-                             "forecast18,weather18,chain18,forecast_backfill,jma_backfill,chain_backfill,smp_backfill)")
+                             "/ repair(결손 복구·정식 갱신) / 단계키 나열 "
+                             "(historical,forecast,weather,jma,chain,smp,forecast18,weather18,chain18,"
+                             "forecast_backfill,weather_backfill,jma_backfill,chain_backfill,smp_backfill,jma_bridge)")
     parsed = parser.parse_args()
     selected = _resolve_steps(parsed.steps)
 

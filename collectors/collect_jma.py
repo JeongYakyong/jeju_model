@@ -15,13 +15,14 @@
 - 실행: 기본은 그날의 **12 UTC 실행** (= 21 KST, KMA 12z base 와 같은 시각).
   ★12/00 UTC 실행만 78h 까지 있어 D+1~D+3 을 덮는다. 다른 실행(03·06·09·15...)은 39h 라 D+1 만.
 
-시간 지연
+시간 지연과 가교 (2026-10-06 사용자 결정)
 ----
 Open-Meteo 에 실행이 올라오기까지 약 3.5시간 걸린다(03 UTC 실행 -> 06:33 UTC 확인).
-12 UTC 실행은 ~15:30 UTC = **~00:30 KST** 로 추정 — 12z 파이프라인(00:20 KST)보다 늦을 수 있다.
-그래서:
-  --wait-minutes N : 12 UTC 실행이 아직이면 N분까지 5분 간격으로 기다린다.
-  그래도 없으면 **가장 최근에 올라온 실행**으로 대체하고 로그에 남긴다(39h 라 D+1 만 덮을 수 있음).
+12 UTC 실행은 00:30 KST 정규 실행보다 늦게 올라오는 날이 많다. 기다리지 않고:
+  - 12 UTC 실행이 아직 없으면 아무것도 받지 않고 끝낸다 → 매시 복구(run_pipeline repair)가 다시 시도.
+  - --bridge (cron 23:00 KST): 그날 **06 UTC 실행**(39h, D+1 을 덮음)을 받아 둔다. 12 UTC 가 늦는 동안
+    serve_chain 이 D+1 만 임시로 예측하는 가교용이다.
+  - 그날 12 UTC 실행을 저장하면 같은 날의 다른 실행(가교)은 지운다 — 정식 갱신 뒤에는 필요 없다.
 실제로 어느 실행을 받았는지는 run_time_utc 컬럼에 남는다.
 
 저장 (forecast_jma, 메인 DB)
@@ -29,8 +30,8 @@ Open-Meteo 에 실행이 올라오기까지 약 3.5시간 걸린다(03 UTC 실�
 (run_time_utc, timestamp) 가 키. timestamp 는 KST.  같은 실행을 다시 받으면 행을 교체한다.
 
 사용 예
-    python collectors/collect_jma.py                     # 오늘 12 UTC 실행 (없으면 최신 실행)
-    python collectors/collect_jma.py --wait-minutes 60   # 12 UTC 실행을 최대 60분 기다림
+    python collectors/collect_jma.py                     # 오늘 12 UTC 실행 (아직 없으면 아무것도 안 받음)
+    python collectors/collect_jma.py --bridge            # 오늘 06 UTC 실행 (D+1 가교용, cron 23:00 KST)
     python collectors/collect_jma.py --run 2026-10-01T12 # 지정 실행
     python collectors/collect_jma.py --backfill 30       # 과거 30일의 12 UTC 실행 (single-runs 는 2026-04-02~)
     python collectors/collect_jma.py --no-save           # 받기만 하고 저장 안 함
@@ -42,7 +43,6 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,8 +58,8 @@ SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 META_URL = "https://api.open-meteo.com/data/jma_msm/static/meta.json"
 MODEL = "jma_msm"
 RUN_HOUR_UTC = 12
+BRIDGE_RUN_HOUR_UTC = 6     # 가교 실행 (39h — D+1 만 덮는다)
 TABLE = "forecast_jma"
-WAIT_INTERVAL_MINUTES = 5
 REQUEST_TIMEOUT = 60
 
 # KMA 수집점과 같은 좌표 (collect_forecast POINTS_JEJU_V2)
@@ -130,6 +130,21 @@ def save(frame: pd.DataFrame) -> int:
     return after - before
 
 
+def delete_bridge_runs(run_time: datetime) -> int:
+    """12 UTC 실행을 저장한 뒤, 같은 UTC 날짜의 다른 실행(06 UTC 가교 등)을 지운다."""
+    day = run_time.strftime("%Y-%m-%d")
+    keep = run_time.strftime("%Y-%m-%d %H:%M:%S")
+    con = sqlite3.connect(P.DB_JEJU)
+    try:
+        deleted = con.execute(
+            f"DELETE FROM {TABLE} WHERE substr(run_time_utc, 1, 10) = ? AND run_time_utc != ?",
+            (day, keep)).rowcount
+        con.commit()
+    finally:
+        con.close()
+    return deleted
+
+
 def target_run_for_today() -> datetime:
     """지금 시각 기준 '오늘 밤 12z base' 에 해당하는 12 UTC 실행.
 
@@ -141,26 +156,11 @@ def target_run_for_today() -> datetime:
     return run if now >= run else run - timedelta(days=1)
 
 
-def resolve_run(target: datetime, wait_minutes: int) -> datetime:
-    """target 실행이 올라왔으면 그대로, 아니면 기다렸다가 끝내 없으면 최신 실행."""
-    deadline = time.time() + wait_minutes * 60
-    while True:
-        latest = latest_available_run()
-        if latest >= target:
-            return target
-        if time.time() >= deadline:
-            print(f"[대체] {target:%Y-%m-%d %H}UTC 실행이 아직 없음 -> 최신 실행 {latest:%Y-%m-%d %H}UTC 사용 "
-                  f"(12/00 UTC 가 아니면 39h 라 D+1 만 덮는다)")
-            return latest
-        print(f"[대기] {target:%H}UTC 실행 미게시 (최신 {latest:%Y-%m-%d %H}UTC) — {WAIT_INTERVAL_MINUTES}분 후 재확인")
-        time.sleep(WAIT_INTERVAL_MINUTES * 60)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="JMA MSM 운량 예보 -> forecast_jma")
     parser.add_argument("--run", help="지정 실행 (UTC, 예: 2026-10-01T12)")
     parser.add_argument("--backfill", type=int, default=0, help="과거 N일의 12 UTC 실행")
-    parser.add_argument("--wait-minutes", type=int, default=0, help="12 UTC 실행을 기다릴 최대 분")
+    parser.add_argument("--bridge", action="store_true", help="오늘 06 UTC 실행 (D+1 가교용)")
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
@@ -169,11 +169,17 @@ def main() -> int:
     elif args.backfill:
         last = target_run_for_today()
         runs = [last - timedelta(days=d) for d in range(args.backfill, -1, -1)]
+    elif args.bridge:
+        runs = [target_run_for_today().replace(hour=BRIDGE_RUN_HOUR_UTC)]
     else:
-        runs = [resolve_run(target_run_for_today(), args.wait_minutes)]
+        runs = [target_run_for_today()]
 
+    latest = latest_available_run()
     failed = 0
     for run_time in runs:
+        if run_time > latest:   # 아직 안 올라온 실행 — 다음 복구 때 다시 시도
+            print(f"[미게시] {run_time:%Y-%m-%d %H}UTC 실행 아직 없음 (최신 {latest:%Y-%m-%d %H}UTC) — 건너뜀")
+            continue
         try:
             frame = fetch_run(run_time)
         except Exception as error:   # 한 실행 실패가 백필 전체를 막지 않도록
@@ -186,6 +192,10 @@ def main() -> int:
             print(message + " [저장 안 함]")
         else:
             print(message + f" -> {TABLE} +{save(frame)}행 (교체 포함 시 0일 수 있음)")
+            if run_time.hour == RUN_HOUR_UTC:
+                deleted = delete_bridge_runs(run_time)
+                if deleted:
+                    print(f"  같은 날 가교 실행 {deleted}행 삭제 (12 UTC 정식 실행으로 대체)")
     return 1 if failed else 0
 
 

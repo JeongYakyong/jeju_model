@@ -50,6 +50,34 @@ ORIGIN_HOUR = 23   # origin 시각 (12z=발행일 23시, 18z=전일 23시 — �
 BASE_HOUR_12Z = '21:00:00'   # base 문자열의 시각부: 12z 발표 = KST 21시
 BASE_HOUR_18Z = '03:00:00'   # 18z 발표 = KST 03시 (당일예보)
 
+# 12z base 의 갱신 방식 (2026-10-06 사용자 결정) — 태양광 PatchTST 는 JMA 12 UTC 운량으로 배웠다.
+#   fresh    : 그날 JMA 12 UTC 실행이 있음 → D+1~5 전부 정식 갱신.
+#   bridge   : 아직 없음 → D+1 만 06 UTC 가교 운량으로 PatchTST. D+2~5 는 안 써서 어제 base 가 그대로 보인다.
+#              PatchTST 가 안 되면 쓰지 않는다(LGBM 은 마감 뒤에만).
+#   deadline : 다음 날 08:00 KST 까지 12 UTC 가 끝내 없음 → 있는 JMA 로 PatchTST, 나머지는 KMA+LGBM 으로 D+1~5.
+# 같은 base 는 (base, timestamp) 키라 나중 갱신이 앞의 임시 행을 그대로 덮어쓴다.
+BRIDGE_DEADLINE_HOUR = 8
+
+
+def solar_mode_12z(base: str) -> str:
+    """12z base 의 갱신 방식 — 'fresh' / 'bridge' / 'deadline' (위 주석 참고)."""
+    origin_day = pd.Timestamp(base).normalize()
+    run_12utc = f'{origin_day:%Y-%m-%d} 12:00:00'
+    with sqlite3.connect(DB) as con:
+        has_12utc = con.execute('SELECT 1 FROM forecast_jma WHERE run_time_utc = ? LIMIT 1',
+                                (run_12utc,)).fetchone()
+    if has_12utc:
+        return 'fresh'
+    deadline = origin_day + pd.Timedelta(days=1, hours=BRIDGE_DEADLINE_HOUR)
+    return 'deadline' if pd.Timestamp.now() >= deadline else 'bridge'
+
+
+def solar_model_label(solar_src: str, mode: str) -> str:
+    """est_horizon_jeju.solar_model 값 — 'patchtst' / 'patchtst_bridge'(12 UTC 운량 아님) / 'lgbm'."""
+    if not solar_src.startswith('patchtst'):
+        return 'lgbm'
+    return 'patchtst' if mode == 'fresh' else 'patchtst_bridge'
+
 
 def base_mode(base: str) -> str:
     """base 문자열의 시각부로 발표 구분: '18z'(03:00, 당일예보) / '12z'(그 외)."""
@@ -101,13 +129,14 @@ def pick_bases(arg_base, backfill, utc: int | None = None) -> list[str]:
 
 
 def _predict_horizons_jeju(base, origin_ts, sc, assets3, demand_pred,
-                           hz=HZ, hd_offset=0, cut_ts=None) -> pd.DataFrame:
+                           hz=HZ, hd_offset=0, cut_ts=None, mode='fresh') -> pd.DataFrame:
     """모델지평 n(hz) 각각 3단계 신재생을 산출해 수요예측과 합쳐 est 행들을 만든다.
 
     net_load = 수요예측 − 시장 태양광 − 시장 풍력. 예보 결손·수요 결측 시각은 그 지평에서 제외.
     est 의 horizon_d = n − hd_offset (12z: offset 0 → n 그대로, 18z: offset 1 → 0..2).
     cut_ts 가 있으면 그 이전 시각은 저장하지 않는다 (18z 당일예보 = base 03시부터 — 확정 설계).
     (sc = 스크래치 임시 DB 연결, demand_pred = 2단계 수요예측 시계열.)
+    mode='bridge' 면 태양광이 LGBM 으로 떨어진 지평은 쓰지 않는다 (solar_mode_12z 참고).
     """
     rows = []
     for n in hz:
@@ -116,6 +145,10 @@ def _predict_horizons_jeju(base, origin_ts, sc, assets3, demand_pred,
         try:
             out, solar_src, wind_src, _ = serve_solarwind._predict_day(sc, origin_ts.normalize(), n, assets3)
         except Exception:
+            continue
+        solar_model = solar_model_label(solar_src, mode)
+        if mode == 'bridge' and solar_model == 'lgbm':
+            print(f'  [bridge] D+{n} 태양광 PatchTST 불가(가교 운량 없음) — 쓰지 않고 이전 base 유지')
             continue
         out = out.copy(); out['timestamp'] = pd.to_datetime(out['timestamp'])
         out = out.set_index('timestamp').reindex(target_idx)
@@ -135,7 +168,8 @@ def _predict_horizons_jeju(base, origin_ts, sc, assets3, demand_pred,
             'est_demand_jeju': demand_day[valid_mask].values,
             'est_solar_util_jeju': solar_util[valid_mask].values, 'est_wind_util_jeju': wind_util[valid_mask].values,
             'est_solar_gen_jeju': solar_gen[valid_mask].values, 'est_wind_gen_jeju': wind_gen[valid_mask].values,
-            'est_net_load_jeju': (demand_day[valid_mask] - solar_gen[valid_mask] - wind_gen[valid_mask]).values}))
+            'est_net_load_jeju': (demand_day[valid_mask] - solar_gen[valid_mask] - wind_gen[valid_mask]).values,
+            'solar_model': solar_model}))
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
@@ -151,6 +185,10 @@ def build_base(base: str, sc, assets3) -> pd.DataFrame:
         else pd.Timestamp(base).normalize()
     origin_ts = origin_day + pd.Timedelta(hours=ORIGIN_HOUR)
     hz = HZ_18Z if m18 else HZ
+    mode = 'fresh' if m18 else solar_mode_12z(base)   # 18z 는 전날 12 UTC 운량을 쓴다 — 정식
+    if mode == 'bridge':
+        hz = (1,)
+    print(f'  base {base} 갱신 방식: {mode}')
     # 기상=forecast_horizon → 스크래치 주입.  18z 는 base 행이 당일 04시부터라 00~03시가
     # 비므로 직전 발표(12z 뼈대) 행으로 패딩한다 (pad_from_prev — 사용자 확정 2026-07-18).
     backtest.set_scratch_forecast(sc, base, postprocess, 'forecast', pad_from_prev=m18)
@@ -168,7 +206,7 @@ def build_base(base: str, sc, assets3) -> pd.DataFrame:
     # ── 지평별 3단계 신재생 + net_load ──
     return _predict_horizons_jeju(base, origin_ts, sc, assets3, demand_pred,
                                   hz=hz, hd_offset=1 if m18 else 0,
-                                  cut_ts=pd.Timestamp(base) if m18 else None)
+                                  cut_ts=pd.Timestamp(base) if m18 else None, mode=mode)
 
 
 def upsert_est(r: pd.DataFrame, db_path: str) -> int:
@@ -177,13 +215,13 @@ def upsert_est(r: pd.DataFrame, db_path: str) -> int:
     def _v(x):
         return None if (x is None or (isinstance(x, float) and not np.isfinite(x))) else float(x)
     data = [(_S(row.timestamp), str(row.base), int(row.horizon_d),
-             *[_v(getattr(row, c)) for c in EST_COLS])
+             *[_v(getattr(row, c)) for c in EST_COLS], row.solar_model)
             for row in r.itertuples(index=False) if np.isfinite(row.est_demand_jeju)]
     if not data:
         return 0
-    set_clause = ', '.join(f'{c}=excluded.{c}' for c in (['horizon_d'] + EST_COLS))
-    col_list = ', '.join(['timestamp', 'base', 'horizon_d'] + EST_COLS)
-    ph = ', '.join('?' * (3 + len(EST_COLS)))
+    set_clause = ', '.join(f'{c}=excluded.{c}' for c in (['horizon_d'] + EST_COLS + ['solar_model']))
+    col_list = ', '.join(['timestamp', 'base', 'horizon_d'] + EST_COLS + ['solar_model'])
+    ph = ', '.join('?' * (4 + len(EST_COLS)))
     with sqlite3.connect(db_path) as con:
         con.execute('CREATE TABLE IF NOT EXISTS est_horizon_jeju ('
                     'timestamp TEXT, base TEXT, horizon_d INT, PRIMARY KEY(base, timestamp))')
@@ -191,6 +229,8 @@ def upsert_est(r: pd.DataFrame, db_path: str) -> int:
         for c in EST_COLS:
             if c not in cols:
                 con.execute(f'ALTER TABLE est_horizon_jeju ADD COLUMN "{c}" REAL')
+        if 'solar_model' not in cols:   # 2026-10-06 추가 — 태양광을 어느 모델로 냈는지 (화면 캡션용)
+            con.execute('ALTER TABLE est_horizon_jeju ADD COLUMN solar_model TEXT')
         con.executemany(
             f'INSERT INTO est_horizon_jeju ({col_list}) VALUES ({ph}) '
             f'ON CONFLICT(base, timestamp) DO UPDATE SET {set_clause}', data)
