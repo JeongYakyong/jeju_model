@@ -143,7 +143,37 @@ def _read_kimg_horizon(con, horizon_d: int) -> pd.DataFrame:
     return kimg.rename(columns={f"radiation_{st}": f"solar_rad_{st}" for st in FUT_STATIONS})
 
 
-def _load_future_source(db_path: Path, qm_dir: Path) -> pd.DataFrame:
+JMA_MJ_PER_W = 0.0036   # W/m^2 -> MJ/m^2/h
+
+
+def _load_jma_raw_radiation_rain(st: str, meteo_dir: Path) -> pd.DataFrame:
+    """JMA 원본 일사·강수 (QM 없음, 2026-10-08). 서빙도 같은 JMA 변수를 받는다.
+
+    경계(분석치 → 전일예보)는 운량과 같은 날짜다 — 전일예보(previous_day1)가 시작되는 시각.
+    d2 열은 JMA 전일예보 previous_day2 (평가 ② D+2 재사용용).
+    """
+    analysis = pd.read_csv(meteo_dir / f"jma_historical_{st}.csv", parse_dates=["time_kst"]).set_index("time_kst").sort_index()
+    forecast = pd.read_csv(meteo_dir / f"jma_previous_runs_{st}.csv", parse_dates=["time_kst"]).set_index("time_kst").sort_index()
+    forecast_start = pd.to_numeric(forecast["cloud_cover_previous_day1"], errors="coerce").first_valid_index()
+    index = analysis.index
+    before_forecast = index < forecast_start
+
+    def to_number(series):
+        return pd.to_numeric(series, errors="coerce").reindex(index)
+
+    radiation_analysis = to_number(analysis["shortwave_radiation"]) * JMA_MJ_PER_W
+    radiation_forecast = to_number(forecast["shortwave_radiation_previous_day1"]) * JMA_MJ_PER_W
+    rain_analysis = to_number(analysis["precipitation"])
+    rain_forecast = to_number(forecast["precipitation_previous_day1"])
+    return pd.DataFrame({
+        "solar_rad": np.where(before_forecast, radiation_analysis, radiation_forecast),
+        "rainfall": np.where(before_forecast, rain_analysis, rain_forecast).clip(max=RAIN_HOURLY_CAP),
+        "solar_rad_d2": to_number(forecast["shortwave_radiation_previous_day2"]) * JMA_MJ_PER_W,
+        "rainfall_d2": to_number(forecast["precipitation_previous_day2"]).clip(upper=RAIN_HOURLY_CAP),
+    }, index=index)
+
+
+def _load_future_source(db_path: Path, qm_dir: Path, jma_raw: bool = False) -> pd.DataFrame:
     """"미래(decoder)" 슬라이스용 예보 시계열 (2026-10-02 사용자 확정 구성).
 
     `*_fut` (학습·서빙 입력):
@@ -177,14 +207,22 @@ def _load_future_source(db_path: Path, qm_dir: Path) -> pd.DataFrame:
     fut = pd.concat(jma_parts, axis=1)
     fut.index.name = "timestamp"
 
-    # 일사·강수: KIMG 구간은 실제 KIMG 로 덮어쓴다 (QM 값은 이 구간에 이미 비어 있다)
-    kimg_d1 = kimg_by_horizon[1]
-    kimg_rows = fut.index >= pd.Timestamp(KIMG_ARCHIVE_START)
-    for st in FUT_STATIONS:
-        for var in ("solar_rad", "rainfall"):
-            fut.loc[kimg_rows, f"{var}_{st}_fut"] = kimg_d1[f"{var}_{st}"].reindex(fut.index[kimg_rows]).values
-            fut[f"{var}_{st}_fut_d{REUSE_EVAL_HORIZON}"] = \
-                kimg_by_horizon[REUSE_EVAL_HORIZON][f"{var}_{st}"].reindex(fut.index)
+    if jma_raw:
+        # 일사·강수 전 구간 JMA 원본 — KIMG 로 덮어쓰지 않는다 (학습·서빙 같은 소스)
+        for st in FUT_STATIONS:
+            raw = _load_jma_raw_radiation_rain(st, qm_dir.parent).reindex(fut.index)
+            for var in ("solar_rad", "rainfall"):
+                fut[f"{var}_{st}_fut"] = raw[var]
+                fut[f"{var}_{st}_fut_d{REUSE_EVAL_HORIZON}"] = raw[f"{var}_d2"]
+    else:
+        # 일사·강수: KIMG 구간은 실제 KIMG 로 덮어쓴다 (QM 값은 이 구간에 이미 비어 있다)
+        kimg_d1 = kimg_by_horizon[1]
+        kimg_rows = fut.index >= pd.Timestamp(KIMG_ARCHIVE_START)
+        for st in FUT_STATIONS:
+            for var in ("solar_rad", "rainfall"):
+                fut.loc[kimg_rows, f"{var}_{st}_fut"] = kimg_d1[f"{var}_{st}"].reindex(fut.index[kimg_rows]).values
+                fut[f"{var}_{st}_fut_d{REUSE_EVAL_HORIZON}"] = \
+                    kimg_by_horizon[REUSE_EVAL_HORIZON][f"{var}_{st}"].reindex(fut.index)
 
     # 현행 서빙 모델 비교용 KIMG 원본
     for horizon_d, kimg in kimg_by_horizon.items():
@@ -194,7 +232,7 @@ def _load_future_source(db_path: Path, qm_dir: Path) -> pd.DataFrame:
 
 
 def export(db_path: Path, out_path: Path, start: str | None, end: str | None,
-          with_future: bool = False, qm_dir: Path | None = None) -> None:
+          with_future: bool = False, qm_dir: Path | None = None, jma_raw: bool = False) -> None:
     if not db_path.exists():
         sys.exit(f"[ERR] DB not found: {db_path}")
 
@@ -222,7 +260,7 @@ def export(db_path: Path, out_path: Path, start: str | None, end: str | None,
     if with_future:
         df = _fill_south_radiation_gaps(df)
         # 눈금 맞춤(변화 시점 이전 ASOS 일사에 월·시각 배율)은 시도 후 철회 — 인위적 수정 (사용자 결정 2026-10-02)
-        fut = _load_future_source(db_path, qm_dir)
+        fut = _load_future_source(db_path, qm_dir, jma_raw=jma_raw)
         before = len(df)
         df = df.merge(fut, on="timestamp", how="left")
         assert len(df) == before, "merge 로 행수가 바뀌면 안 된다(timestamp 유일성 깨짐)"
@@ -258,8 +296,11 @@ def main() -> None:
     ap.add_argument("--qm-dir", type=Path,
                     default=REPO_ROOT / "data" / "refdata" / "meteo_data" / "processed",
                     help="fit_jma_monthly_qm.py 산출물(jma_future_{st}.csv) 위치")
+    ap.add_argument("--jma-raw", action="store_true",
+                    help="미래 일사·강수를 QM·KIMG 없이 JMA 원본(분석치→전일예보)으로 (--with-future 필요)")
     args = ap.parse_args()
-    export(args.db, args.out, args.start, args.end, with_future=args.with_future, qm_dir=args.qm_dir)
+    export(args.db, args.out, args.start, args.end, with_future=args.with_future, qm_dir=args.qm_dir,
+           jma_raw=args.jma_raw)
 
 
 if __name__ == "__main__":

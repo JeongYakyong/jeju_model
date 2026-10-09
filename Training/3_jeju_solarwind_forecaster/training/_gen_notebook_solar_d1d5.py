@@ -19,7 +19,9 @@
   3. **피처 단순화: 지점별 [solar_rad, total_cloud(JMA)] + Hour_sin/cos (6개).**
      midlow_cloud(JMA 예보에 없음)·solar_damping·Kt 제거 — 실험(2026-10-02)에서 Kt·강수감쇠를 빼도
      나빠지지 않았고 permutation 비중도 거의 0 이었다.
-  4. **07-30 구성으로 복원** — Year_sin/cos 없음, train ≤2026-01 / val 2026-02~05 / test 2026-06~.
+  4. (2026-10-08 갱신) 일사·강수도 JMA 원본으로 바꾸고 split 을 train ≤2024 / val 2025 / test 2026~ 로 변경.
+     Year_sin/cos 는 생성기 옵션 `--year` 로 켠 변형과 끈 변형을 따로 만든다.
+     (아래는 10-02 시점 기록) 07-30 구성으로 복원 — Year_sin/cos 없음, train ≤2026-01 / val 2026-02~05 / test 2026-06~.
      08-25 재학습(Year + val 4계절)은 실패했고 두 변경을 같이 해 원인 분리가 안 됐다.
      이번엔 "미래 소스 + 피처 단순화" 만 바꾼다. 최근 표본 가중치(반감기)는 차이가 없어 쓰지 않는다.
   5. **D+1 만 기본 학습** (목표 = D+1 정확도).  D+2~D+5 는 평가 ②로 "D+1 가중치 재사용"을
@@ -47,9 +49,13 @@ metadata.pkl 은 solar·wind 키를 **함께** 갖는다. wind 를 재학습하�
     python Training/3_jeju_solarwind_forecaster/training/_gen_notebook_solar_d1d5.py
 """
 import json
+import sys
 from pathlib import Path
 
-OUT = Path(__file__).resolve().parent / "train_solar_d1d5_colab.ipynb"
+# 2026-10-08: `--year` 를 주면 Year_sin/cos 를 미래 입력에 넣은 변형을 만든다 (없음/있음 두 벌을 같은 split 으로 비교).
+USE_YEAR = "--year" in sys.argv
+OUT = Path(__file__).resolve().parent / ("train_solar_d1d5_colab_year.ipynb" if USE_YEAR
+                                         else "train_solar_d1d5_colab.ipynb")
 CELLS = []
 
 
@@ -58,7 +64,7 @@ def md(s):
 
 
 def code(s):
-    CELLS.append(("code", s.strip("\n")))
+    CELLS.append(("code", s.strip("\n").replace("__USE_YEAR__", str(USE_YEAR))))
 
 
 # ── 0. 개요 ───────────────────────────────────────────────────────────────
@@ -66,12 +72,12 @@ md(r"""
 # 제주 Solar 이용률 PatchTST — 예보 기반 미래 입력 재학습 (2026-10-02)
 
 학습의 **미래 입력을 실측(ASOS) → 예보**로 바꿔 train/serve skew 를 없앤다.
-운량 = **JMA**(KIMG 운량 미사용), 일사·강수 = KIMG(과거 구간은 JMA 월별 QM).
+운량·일사·강수 = **전부 JMA 원본**(QM·KIMG 없음 — 2026-10-08, 서빙도 JMA 일사를 받는다).
 과거 입력은 기존대로 ASOS. 피처 = 지점별 **일사·운량** + 시간(6개). 목표는 **D+1 정확도**.
 
 ## 준비물 (좌측 파일창에 업로드)
-- `solarwind_raw_jeju_trainserve.csv` — 로컬에서
-  `export_solarwind_csv.py --with-future --out .../solarwind_raw_jeju_trainserve.csv` 로 만든 것.
+- `solarwind_raw_jeju_trainserve_jmaraw.csv` — 로컬에서
+  `export_solarwind_csv.py --with-future --jma-raw --out .../solarwind_raw_jeju_trainserve_jmaraw.csv` 로 만든 것.
 - (비교용, 선택) 현행 서빙 모델을 `/content/old_model/` 에:
   `best_patchtst_solar_model.pth`, `MinMax_scaler_solar.pkl`, `metadata.pkl`
   (`models/solarwind_patchtst/`), `best_patchtst_solar_model_D2..D5.pth`
@@ -123,18 +129,22 @@ code(r"""
 # ==========================================================================
 # CONFIG — 경로 / 학습창 / 지평 / 하이퍼파라미터
 # ==========================================================================
-CSV_PATH = '/content/solarwind_raw_jeju_trainserve.csv'
+CSV_PATH = '/content/solarwind_raw_jeju_trainserve_jmaraw.csv'
 OUT_DIR  = '/content/out'
 OLD_MODEL_DIR = '/content/old_model'   # 비교용 현행 서빙 모델 (없으면 비교 행 생략)
 os.makedirs(OUT_DIR, exist_ok=True)
 
 PRED_LEN = 24            # 한 번에 24h 예측
 
-# 학습창 — 07-30 구성(현행 서빙 모델과 같은 경계)으로 복원. test 만 데이터 끝까지 늘어난다.
-#   08-25 의 "val = 2025 전체" 재분할은 Year_sin/cos 와 함께 실패했다(원인 분리 불가).
-TRAIN_END = '2026-01-31 23:00'      # train = 2020-01 ~ 2026-01
-VAL_END   = '2026-05-31 23:00'      # val   = 2026-02 ~ 05
-TEST_END  = None                    # test  = 2026-06 ~ 데이터 끝 (None = 자동)
+# 학습창 (2026-10-08) — 일사·운량·강수가 전 구간 JMA 한 소스라 어느 구간이든 서빙 조건과 같다.
+#   그래서 val 을 4계절 한 해(2025)로 잡을 수 있다. (08-25 의 같은 val 분할은 미래 입력이 ASOS 였던 구조 +
+#   Year 동시 변경이라 이번 결과와 직접 비교할 수 없다.)
+TRAIN_END = '2024-12-31 23:00'      # train = 2020-01 ~ 2024-12
+VAL_END   = '2025-12-31 23:00'      # val   = 2025 전체 (early stopping 은 4계절 val 로)
+TEST_END  = None                    # test  = 2026-01 ~ 데이터 끝 (None = 자동)
+
+# 날짜 피처 — 미래 입력에 Year_sin/cos(dayofyear)를 넣을지. 생성기 옵션 --year 로 정해진다.
+USE_YEAR_FEATURES = __USE_YEAR__
 
 # 미래 입력 열 접미사 — export_solarwind_csv.py --with-future 가 만든다
 FUTURE_SUFFIX = '_fut'              # 운량 JMA / 일사·강수 KIMG(과거는 JMA 월별 QM)
@@ -246,6 +256,8 @@ future_features_solar = []
 for st in SOLAR_STATIONS:
     future_features_solar += [f'solar_rad_{st}', f'total_cloud_{st}']
 future_features_solar += ['Hour_sin', 'Hour_cos']
+if USE_YEAR_FEATURES:
+    future_features_solar += ['Year_sin', 'Year_cos']
 features_solar = future_features_solar + ['Solar_Utilization']
 print('solar future_features (%d):' % len(future_features_solar), future_features_solar)
 
@@ -664,9 +676,11 @@ metadata = {
     'solar_stations': SOLAR_STATIONS,
     'wind_stations':  WIND_STATIONS,
     # 이번 재학습 기록 (서빙은 안 읽지만 추적용)
-    'retrained': '2026-10-02 solar (미래 입력: 운량=JMA, 일사·강수=KIMG(과거 JMA 월별QM) / 피처 6개: 일사·운량+Hour / '
-                 '07-30 학습창 / wind 미학습)',
+    'retrained': '2026-10-08 solar (미래 입력: 운량·일사·강수 전부 JMA 원본(QM 없음) / 피처: 일사·운량+Hour'
+                 + ('+Year' if USE_YEAR_FEATURES else '') + ' / train<=2024 val=2025 test=2026~ / wind 미학습)',
     'future_cloud_source': 'JMA',
+    'future_radiation_source': 'JMA',
+    'use_year_features': USE_YEAR_FEATURES,
     'loss_weights': {'cloudy': LOSS_CLOUDY_WEIGHT, 'overpredict': LOSS_OVERPREDICT_PENALTY},   # ★서빙은 운량을 JMA 예보에서 읽어야 한다
     'recency_half_life_years': RECENCY_HALF_LIFE_YEARS,
     'train': f'<={TRAIN_END}', 'val': f'~{VAL_END}', 'test': f'~{TEST_END}',

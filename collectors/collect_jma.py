@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""collect_jma.py -- JMA MSM 운량 예보(Open-Meteo) -> 메인 DB forecast_jma.
+"""collect_jma.py -- JMA MSM 운량·일사 예보(Open-Meteo) -> 메인 DB forecast_jma.
 
 왜 필요한가 (2026-10-02 사용자 확정)
 ----
@@ -10,6 +10,9 @@
 무엇을 받나
 ----
 - 모델 jma_msm, 변수 cloud_cover(%) -> total_cloud_{west,south,east} (0~1)
+- (2026-10-08) shortwave_radiation(W/m2) -> solar_rad_{west,south} (MJ/m2/h = W x 0.0036).
+  태양광 재학습이 일사도 JMA 원본으로 배우기 때문이다 (KIMG 일사는 흐린 날 +19% 과대). east 는 일사계가 없다.
+  학습 파일(jma_previous_runs_*.csv)의 W/m2 와 단위·시각 정렬이 같음을 확인(전일 00 UTC 실행, 최대차 8 W/m2).
 - 좌표 = KMA 수집점(collect_forecast POINTS_JEJU_V2)과 동일.  학습 파일
   (data/refdata/meteo_data/jma_previous_runs_*.csv)과 값이 100% 일치함을 확인(2026-10-02).
 - 실행: 기본은 그날의 **12 UTC 실행** (= 21 KST, KMA 12z base 와 같은 시각).
@@ -60,6 +63,8 @@ MODEL = "jma_msm"
 RUN_HOUR_UTC = 12
 BRIDGE_RUN_HOUR_UTC = 6     # 가교 실행 (39h — D+1 만 덮는다)
 TABLE = "forecast_jma"
+MJ_PER_W = 0.0036            # W/m2 -> MJ/m2/h (학습 파일과 같은 환산)
+RADIATION_STATIONS = ["west", "south"]
 REQUEST_TIMEOUT = 60
 
 # KMA 수집점과 같은 좌표 (collect_forecast POINTS_JEJU_V2)
@@ -77,12 +82,12 @@ def latest_available_run() -> datetime:
 
 
 def fetch_run(run_time: datetime) -> pd.DataFrame:
-    """한 실행의 지점별 운량. 반환: timestamp(KST), lead_hour, total_cloud_{지점}."""
+    """한 실행의 지점별 운량·일사. 반환: timestamp(KST), lead_hour, total_cloud_{지점}, solar_rad_{west,south}."""
     params = {
         "latitude": ",".join(str(p["lat"]) for p in POINTS),
         "longitude": ",".join(str(p["lon"]) for p in POINTS),
         "run": run_time.strftime("%Y-%m-%dT%H:%M"),
-        "hourly": "cloud_cover",
+        "hourly": "cloud_cover,shortwave_radiation",
         "models": MODEL,
     }
     response = requests.get(SINGLE_RUNS_URL, params=params, timeout=REQUEST_TIMEOUT)
@@ -97,27 +102,36 @@ def fetch_run(run_time: datetime) -> pd.DataFrame:
         hourly = location["hourly"]
         times_utc = pd.to_datetime(hourly["time"])
         cloud = pd.to_numeric(pd.Series(hourly["cloud_cover"]), errors="coerce") / 100.0
-        part = pd.DataFrame({"time_utc": times_utc, f"total_cloud_{point['suffix']}": cloud.values})
+        columns = {"time_utc": times_utc, f"total_cloud_{point['suffix']}": cloud.values}
+        if point["suffix"] in RADIATION_STATIONS:
+            radiation = pd.to_numeric(pd.Series(hourly["shortwave_radiation"]), errors="coerce") * MJ_PER_W
+            columns[f"solar_rad_{point['suffix']}"] = radiation.values
+        part = pd.DataFrame(columns)
         frame = part if frame is None else frame.merge(part, on="time_utc", how="outer")
 
     cloud_cols = [f"total_cloud_{p['suffix']}" for p in POINTS]
+    radiation_cols = [f"solar_rad_{suffix}" for suffix in RADIATION_STATIONS]
     frame = frame.dropna(subset=cloud_cols, how="all")     # 예보 길이 밖은 전부 NaN 으로 온다
     frame["timestamp"] = frame["time_utc"] + timedelta(hours=9)
     frame["lead_hour"] = ((frame["time_utc"] - run_time) / timedelta(hours=1)).astype(int)
     frame["run_time_utc"] = run_time.strftime("%Y-%m-%d %H:%M:%S")
     frame["timestamp"] = frame["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
-    return frame[["run_time_utc", "timestamp", "lead_hour"] + cloud_cols]
+    return frame[["run_time_utc", "timestamp", "lead_hour"] + cloud_cols + radiation_cols]
 
 
 def save(frame: pd.DataFrame) -> int:
-    cloud_cols = [c for c in frame.columns if c.startswith("total_cloud_")]
+    value_cols = [c for c in frame.columns if c.startswith(("total_cloud_", "solar_rad_"))]
     con = sqlite3.connect(P.DB_JEJU)
     try:
         con.execute(
             f"CREATE TABLE IF NOT EXISTS {TABLE} ("
             "run_time_utc TEXT NOT NULL, timestamp TEXT NOT NULL, lead_hour INTEGER, "
-            + ", ".join(f"{c} REAL" for c in cloud_cols)
+            + ", ".join(f"{c} REAL" for c in value_cols)
             + ", PRIMARY KEY (run_time_utc, timestamp))")
+        existing = {row[1] for row in con.execute(f"PRAGMA table_info({TABLE})")}
+        for column in value_cols:                      # 운량만 있던 옛 테이블에 일사 열 추가
+            if column not in existing:
+                con.execute(f"ALTER TABLE {TABLE} ADD COLUMN {column} REAL")
         before = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
         columns = list(frame.columns)
         con.executemany(

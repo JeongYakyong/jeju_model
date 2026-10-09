@@ -213,9 +213,11 @@ def _apply_tcog(con, idx, su, wu, betas):
 # =============================================================================
 # SOLAR PatchTST direct — 발행 origin 기준 D+n 대상일 24h
 # =============================================================================
-def _build_solar_direct(con, origin, n, seq_len, cloud_source='KIMG'):
+def _build_solar_direct(con, origin, n, seq_len, cloud_source='KIMG', radiation_source='KIMG'):
     """cloud_source = metadata 의 future_cloud_source. 'JMA' 면 미래 운량을 forecast_jma 에서 읽는다
-    (2026-10-02 재학습 모델 — KIMG 운량은 과대라 학습에 안 썼다). 없으면 옛 모델처럼 KIMG."""
+    (2026-10-02 재학습 모델 — KIMG 운량은 과대라 학습에 안 썼다). 없으면 옛 모델처럼 KIMG.
+    radiation_source = metadata 의 future_radiation_source (2026-10-08 재학습부터). 'JMA' 면 미래 일사도
+    forecast_jma 의 JMA 원본(MJ/m2/h)으로 바꾼다. 강수는 모델 입력이 아니므로 KIMG 그대로 둔다."""
     d = pd.Timestamp(origin).normalize() + pd.Timedelta(days=n)   # 대상일 00:00
     offset = (n - 1) * 24
     first = d - pd.Timedelta(hours=offset + seq_len)
@@ -235,11 +237,16 @@ def _build_solar_direct(con, origin, n, seq_len, cloud_source='KIMG'):
     past = patchtst._read_hist(con, s(first), s(last_past), hist_cols + [util_col])
     fore = patchtst._read_fore(con, s(d), s(fut_end), list(fore_map))
     fore = fore.apply(pd.to_numeric, errors='coerce').rename(columns=fore_map)
-    if cloud_source == 'JMA':
-        # 운량만 JMA 로 바꾼다 (일사·강수는 KIMG). JMA 가 비면 아래 결측 검사에 걸려 LGBM 폴백.
-        jma = patchtst.read_jma_cloud(origin, s(d), s(fut_end), patchtst.SOLAR_STATIONS)
-        for st in patchtst.SOLAR_STATIONS:
-            fore[f'total_cloud_{st}'] = jma[f'total_cloud_{st}'].reindex(fore.index)
+    if cloud_source == 'JMA' or radiation_source == 'JMA':
+        # JMA 로 바꾼다 (기본: 운량만 / radiation_source='JMA' 면 일사도). JMA 가 비면 아래 결측 검사에 걸려 LGBM 폴백.
+        jma_columns = []
+        if cloud_source == 'JMA':
+            jma_columns += [f'total_cloud_{st}' for st in patchtst.SOLAR_STATIONS]
+        if radiation_source == 'JMA':
+            jma_columns += [f'solar_rad_{st}' for st in patchtst.SOLAR_STATIONS]
+        jma = patchtst.read_jma_forecast(origin, s(d), s(fut_end), jma_columns)
+        for column in jma_columns:
+            fore[column] = jma[column].reindex(fore.index)
     if len(past) < seq_len or past[util_col].isna().any():
         raise ValueError(f'past 부족/NaN ({len(past)}/{seq_len})')
     if len(fore) != PL or fore[hist_cols].isna().any().any():
@@ -262,7 +269,8 @@ def _solar_util(con, origin, n, assets):
     if n in solar_models:
         try:
             combined, past_idx, fut_idx, past_util = _build_solar_direct(
-                con, origin, n, md['SEQ_LEN_SOLAR'], md.get('future_cloud_source', 'KIMG'))
+                con, origin, n, md['SEQ_LEN_SOLAR'], md.get('future_cloud_source', 'KIMG'),
+                md.get('future_radiation_source', 'KIMG'))
             util = patchtst._infer(solar_models[n], sc_solar, combined, past_idx, fut_idx, past_util,
                              md['future_features_solar'], 'Solar_Utilization', md['SEQ_LEN_SOLAR'], device)
             return util, 'patchtst'
