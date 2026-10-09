@@ -1,73 +1,86 @@
 # -*- coding: utf-8 -*-
-"""풍력 입력 풍속 분위수 매핑(QM) 보정표 적합 — NWP 예보 풍속 → 실측 분포.
+"""풍력 입력 풍속 분위수 매핑(QM) 보정표 적합 — NWP 예보 풍속 → 실측(ASOS) 분포, 시각대별.
 
-배경(2026-06-23 진단): 풍력 LGBM 은 실측 풍속(historical.wind_spd_{st})으로 학습했는데
-서빙 땐 수치예보(forecast_horizon.wind_spd_10m_{st})를 먹는다. 두 분포가 어긋나 출력이
-이용률을 +7.5%p 과대예측한다. 특히 east 는 NWP 가 +1.4m/s(+45%) 과대(분산도 팽창),
-west 는 평균은 맞지만 분산 압축(약풍 과대·강풍 과소). 이를 분위수 매핑으로 학습 분포에
-되돌려 입력을 정합시킨다(모델 재학습 없음).
+배경: 풍력 LGBM 은 실측 풍속(historical.wind_spd_{st})으로 학습했는데 서빙 땐 수치예보
+(forecast_horizon.wind_spd_10m_{st})를 먹는다. 두 분포가 어긋나 있어(특히 east 는 예보가 평균
++1.4 m/s 과대) 분위수 매핑으로 입력을 학습 분포에 되돌린다. 모델 재학습과 무관한 입력 변환이다.
 
-검증(전 기간 5겹 OOF, 단지평 D+1~3): nMAE 13.57→11.27%(-17%), bias +7.53→+1.39%p,
-전 계절·전 지평 재현. 단 실측 강풍(≥12m/s, ~16% 시간)은 NWP 가 애초에 못 잡아 과소예측이
-조금 깊어짐 — 보정으로 못 만드는 NWP 한계(가스 관점 보수적). 상세 REPORT_wind_qm.md.
+시각대별(2026-10-09): 예보 편향이 하루 중 일정하지 않다 — west 는 밤·아침 +0.6, 낮 +0.2 m/s
+(실측은 낮에 0.7 m/s 더 센데 예보는 이 일변화가 약하다). 하루 전체를 한 번에 맞추면 낮이 과하게
+깎여 정오 과소예측이 된다. 5개 시각대로 나눠 각각 분위수 매핑한다.
+검증(예보 입력, 2025-12-20~, 월 단위 교차검증): 정오(10~15시) 편향 -0.031 → -0.019, MAE 0.1033 → 0.1025.
+지평별 분리는 효과가 없어 넣지 않는다(D+1~3 풀링).
 
-산출: lgbm_models/wind_qm.json  (서빙 serve_solarwind_hybrid._apply_wind_qm 가 읽음)
-실행: python fit_wind_qm.py [--horizons 1,2,3]
+산출: models/solarwind_lgbm/wind_qm.json  (서빙 serve_solarwind._apply_wind_qm 이 읽는다)
+실행: python Training/3_jeju_solarwind_forecaster/training/fit_wind_qm.py
 """
 from __future__ import annotations
-import os, sys, json, sqlite3, argparse
+import os, sys, json, sqlite3
 import numpy as np, pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, '..', '..'))
-DB   = os.path.join(ROOT, '1. data_fetcher_and_db', 'data', 'input_data_jeju.db')
-OUT  = os.path.join(HERE, '..', 'lgbm_models', 'wind_qm.json')
+ROOT = HERE
+while ROOT != os.path.dirname(ROOT) and not os.path.exists(os.path.join(ROOT, 'project_paths.py')):
+    ROOT = os.path.dirname(ROOT)
+sys.path.insert(0, ROOT)
+import project_paths as P
+
+OUT = os.path.join(P.DIR_MODELS_SOLARWIND_LGBM, 'wind_qm.json')
 STATIONS = ['west', 'east']
-NQ = 199   # 분위수 격자(0.005~0.995)
+HORIZONS = (1, 2, 3)
+HOUR_BLOCKS = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9], [10, 11, 12, 13, 14, 15], [16, 17, 18, 19], [20, 21, 22, 23]]
+NQ = 100   # 분위수 격자(0~1, 양 끝 포함)
 
 
-def fit(horizons):
-    con = sqlite3.connect(DB)
-    fh = pd.read_sql("SELECT base, timestamp, wind_spd_10m_west, wind_spd_10m_east "
-                     "FROM forecast_horizon", con, parse_dates=['timestamp'])
+def load_pairs():
+    """예보-실측 짝. 같은 (대상시각, 지평)에 base 가 여럿이면 가장 최근 발표만 쓴다."""
+    con = sqlite3.connect(P.DB_JEJU)
+    fh = pd.read_sql("SELECT timestamp, base, horizon_d, wind_spd_10m_west, wind_spd_10m_east "
+                     "FROM forecast_horizon WHERE horizon_d BETWEEN ? AND ?", con,
+                     params=(min(HORIZONS), max(HORIZONS)), parse_dates=['timestamp'])
     hist = pd.read_sql("SELECT timestamp, wind_spd_west, wind_spd_east FROM historical",
                        con, parse_dates=['timestamp']).set_index('timestamp')
     con.close()
-    fh['horizon'] = (fh['timestamp'].dt.normalize() - pd.to_datetime(fh['base']).dt.normalize()).dt.days
-    fh = fh[fh['horizon'].isin(horizons)]
-    qs = np.linspace(0.005, 0.995, NQ)
-    stations = {}; report = {}
+    fh = fh.sort_values('base').groupby(['timestamp', 'horizon_d']).tail(1)
+    pairs = fh.merge(hist, left_on='timestamp', right_index=True, suffixes=('_fc', '_obs'))
+    pairs = pairs.rename(columns={'wind_spd_10m_west': 'fc_west', 'wind_spd_10m_east': 'fc_east',
+                                  'wind_spd_west': 'obs_west', 'wind_spd_east': 'obs_east'})
+    wind_columns = ['fc_west', 'fc_east', 'obs_west', 'obs_east']
+    pairs[wind_columns] = pairs[wind_columns].apply(pd.to_numeric, errors='coerce')
+    pairs['hour'] = pairs['timestamp'].dt.hour
+    return pairs
+
+
+def main():
+    pairs = load_pairs()
+    qs = np.linspace(0, 1, NQ)
+    stations, report = {}, {}
     for st in STATIONS:
-        x = pd.to_numeric(fh[f'wind_spd_10m_{st}'], errors='coerce')
-        y = fh['timestamp'].map(pd.to_numeric(hist[f'wind_spd_{st}'], errors='coerce'))
-        m = x.notna() & y.notna()
-        x, y = x[m].values, y[m].values
-        fc_q = np.quantile(x, qs); obs_q = np.quantile(y, qs)
-        stations[st] = {'q': qs.round(4).tolist(),
-                        'fc_q': fc_q.round(4).tolist(), 'obs_q': obs_q.round(4).tolist()}
-        # 적합 진단: 매핑 전후 평균/편향
-        xc = np.clip(np.interp(x, fc_q, obs_q), 0, None)
-        report[st] = {'n': int(m.sum()),
-                      'fc_mean': float(x.mean()), 'obs_mean': float(y.mean()),
-                      'bias_before': float((x - y).mean()), 'bias_after': float((xc - y).mean()),
-                      'std_fc': float(x.std()), 'std_obs': float(y.std())}
-    payload = {'_doc': 'NWP 풍속→실측 분위수 매핑(풍력 입력 보정). 서빙 _apply_wind_qm 사용.',
-               'horizons_fit': horizons, 'n_quantiles': NQ, 'stations': stations, 'report': report}
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+        blocks, rep = [], []
+        for hours in HOUR_BLOCKS:
+            sel = pairs[pairs['hour'].isin(hours)][[f'fc_{st}', f'obs_{st}']].dropna()
+            fc, obs = sel[f'fc_{st}'].values, sel[f'obs_{st}'].values
+            fc_q, obs_q = np.quantile(fc, qs), np.quantile(obs, qs)
+            mapped = np.clip(np.interp(fc, fc_q, obs_q), 0, None)
+            blocks.append({'hours': hours, 'fc_q': fc_q.round(4).tolist(), 'obs_q': obs_q.round(4).tolist()})
+            rep.append({'hours': f'{hours[0]}-{hours[-1]}', 'n': int(len(sel)),
+                        'bias_before': round(float((fc - obs).mean()), 3),
+                        'bias_after': round(float((mapped - obs).mean()), 3)})
+        stations[st] = {'blocks': blocks}
+        report[st] = rep
+    payload = {'_doc': 'NWP 풍속→실측 분위수 매핑(풍력 입력 보정, 시각대별). 서빙 _apply_wind_qm 사용.',
+               'horizons_fit': list(HORIZONS), 'n_quantiles': NQ,
+               'fit_period': [str(pairs['timestamp'].min()), str(pairs['timestamp'].max())],
+               'stations': stations, 'report': report}
     with open(OUT, 'w', encoding='utf-8') as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    print('saved', os.path.normpath(OUT))
+    print('saved', OUT, '| 적합 기간', payload['fit_period'])
     for st in STATIONS:
-        r = report[st]
-        print(f"  [{st}] n={r['n']}  예보평균 {r['fc_mean']:.2f}→실측 {r['obs_mean']:.2f}  "
-              f"편향 {r['bias_before']:+.2f}→{r['bias_after']:+.2f} m/s  "
-              f"std {r['std_fc']:.2f}/{r['std_obs']:.2f}")
+        for r in report[st]:
+            print(f"  [{st}] {r['hours']:>5}시 n={r['n']:>5}  편향 {r['bias_before']:+.2f} → {r['bias_after']:+.2f} m/s")
 
 
 if __name__ == '__main__':
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--horizons', default='1,2,3', help='적합에 쓸 지평(기본 단지평 1,2,3)')
-    a = ap.parse_args()
-    fit([int(x) for x in a.horizons.split(',')])
+    main()

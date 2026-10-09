@@ -43,5 +43,12 @@
   "test": "2026-06-01..2026-07-31 23:00",
   "deploy_refit": "train+val+test 전체 재적합 (n_estimators=best_iteration 고정)",
   "source": "main DB historical (2026-07-30 재학습; 구 solarwind_raw_jeju.csv 대체)",
-  "clearsky_clim": "train 구간 (month,hour) rad 90분위 — 서빙이 같은 학습창으로 재현해야 함"
+  "clearsky_clim": "train 구간 (month,hour) rad 90분위 — 서빙이 같은 학습창으로 재현해야 함",
+  "wind_train": {
+    "train": "2020-01-01..2025-09-19 23:00 (출력제어 의심 시각 제외)",
+    "validation": "2025-09-20..2025-12-19 23:00",
+    "deploy_refit": "2020-01-01..2026-10-05 07:00:00 전체 재적합, n_estimators=243",
+    "excluded_hours": "data/refdata/curtailment_excluded_hours.csv (2168행)",
+    "note": "2026-10-09 재학습. 입력 풍속 보정은 wind_qm.json(시각대별 QM). 근거는 이 스크립트 상단 주석."
+  }
 }

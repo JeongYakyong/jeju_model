@@ -46,7 +46,7 @@ JEJU_HORIZONS = (1, 2, 3, 4, 5, 6, 7)
 # 모델은 해질녘/밤에 가짜 이용률(겨울 18h ~0.15, 최대 92MW)을 흘림 — 천문 일출일몰로 차단.
 JEJU_LAT, JEJU_LON, SOLAR_ELEV_MIN = 33.38, 126.55, 5.0   # 제주 남/서 태양광권역 대표 좌표
 
-# 풍력 입력 풍속 QM 보정(사용자 확정 2026-06-23): NWP 예보 풍속 → 학습 분포(실측) 분위수 매핑.
+# 풍력 입력 풍속 QM 보정(사용자 확정 2026-06-23, 2026-10-09 시각대별로 변경): NWP 예보 풍속 → 학습 분포(실측) 분위수 매핑.
 # 풍력 LGBM 은 실측 풍속으로 학습했으나 서빙은 NWP 를 먹어 분포 불일치(특히 east +1.4m/s 과대)
 # → 이용률 +7.5%p 과대예측. QM 으로 입력을 학습 분포에 정합. 풍력 입력만 보정(태양광 무관).
 # 검증(전 기간 OOF, 단지평): nMAE 13.57→11.27%·bias +7.5→+1.4%p. 강풍(실측≥12)은 NWP 한계로
@@ -69,33 +69,37 @@ _SSCALE = None
 
 
 def _wind_qm():
-    """QM 보정표 로드(메모이즈). {station: (fc_q, obs_q)}. 없거나 끄면 {}."""
+    """QM 보정표 로드(메모이즈). {station: [(hours, fc_q, obs_q), ...]} (시각대별). 없거나 끄면 {}."""
     global _WQM
     if _WQM is not None:
         return _WQM
     if not (APPLY_WIND_QM and os.path.exists(WIND_QM_JSON)):
         _WQM = {}; return _WQM
     d = json.load(open(WIND_QM_JSON, encoding='utf-8'))
-    _WQM = {st: (np.asarray(v['fc_q'], float), np.asarray(v['obs_q'], float))
+    _WQM = {st: [(b['hours'], np.asarray(b['fc_q'], float), np.asarray(b['obs_q'], float))
+                 for b in v['blocks']]
             for st, v in d['stations'].items()}
     return _WQM
 
 
 def _apply_wind_qm(wx):
-    """서빙 풍속(예보)을 실측 분포로 분위수 매핑(단조). NaN(기후값 폴백)은 통과.
-    build_features 직전에 호출 — wind_zone_east 도 보정된 east 에서 파생됨."""
+    """서빙 풍속(예보)을 실측 분포로 시각대별 분위수 매핑(단조). NaN(기후값 폴백)은 통과.
+    wx 의 index 가 KST 시각이다. build_features 직전에 호출 — wind_zone_east 도 보정된 east 에서 파생됨."""
     qm = _wind_qm()
     if not qm:
         return wx
     wx = wx.copy()
+    hours = pd.DatetimeIndex(wx.index).hour.values
     for st in ('west', 'east'):
         col = f'wind_spd_{st}'
-        if col in wx.columns and st in qm:
-            fc_q, obs_q = qm[st]
-            v = pd.to_numeric(wx[col], errors='coerce').values.astype(float)
-            m = np.isfinite(v)
-            v[m] = np.clip(np.interp(v[m], fc_q, obs_q), 0, None)
-            wx[col] = v
+        if col not in wx.columns or st not in qm:
+            continue
+        v = pd.to_numeric(wx[col], errors='coerce').values.astype(float)
+        mapped = v.copy()
+        for block_hours, fc_q, obs_q in qm[st]:
+            sel = np.isin(hours, block_hours) & np.isfinite(v)
+            mapped[sel] = np.clip(np.interp(v[sel], fc_q, obs_q), 0, None)
+        wx[col] = mapped
     return wx
 
 
@@ -190,12 +194,13 @@ def _assets():
 
 
 def _apply_tcog(con, idx, su, wu, betas):
-    """대류일 후처리: corrected = clip(pred + beta*tcog_station, 0,1). tcog 없으면 무보정.
-    지점은 잔차적합으로 선택(3cmp-3): solar=tcog_south, wind=tcog_east(west는 모델 주피처라 잉여)."""
+    """대류일 후처리(태양광만): corrected = clip(pred + beta*tcog_south, 0,1). tcog 없으면 무보정.
+    풍력은 2026-10-09 제거 — 적용 시간 4.6%·평균 +0.047 이라 효과가 없고 MAE 가 0.1048→0.1052 로 오히려 미세 악화.
+    wu 는 그대로 통과시킨다(호출부 시그니처 유지)."""
     if betas is None:
         return su, wu, False
-    s_st = betas.get('solar_tcog', 'south'); w_st = betas.get('wind_tcog', 'east')
-    sel = ', '.join(f'"{c}"' for c in ['timestamp', f'tcog_{s_st}', f'tcog_{w_st}'])
+    s_st = betas.get('solar_tcog', 'south')
+    sel = ', '.join(f'"{c}"' for c in ['timestamp', f'tcog_{s_st}'])
     try:
         t = pd.read_sql(f'SELECT {sel} FROM forecast WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp', con,
                         params=(idx[0].strftime('%Y-%m-%d %H:%M:%S'), idx[-1].strftime('%Y-%m-%d %H:%M:%S')),
@@ -203,11 +208,8 @@ def _apply_tcog(con, idx, su, wu, betas):
     except Exception:
         return su, wu, False
     tcs = t[f'tcog_{s_st}'].fillna(0).clip(lower=0).values
-    tcw = t[f'tcog_{w_st}'].fillna(0).clip(lower=0).values
     su2 = np.clip(su + betas['solar_beta'] * tcs, 0, 1)
-    wu2 = np.clip(wu + betas['wind_beta'] * tcw, 0, 1)
-    applied = bool((tcs > 0).any() or (tcw > 0).any())
-    return su2, wu2, applied
+    return su2, wu, bool((tcs > 0).any())
 
 
 # =============================================================================
@@ -307,7 +309,7 @@ def _predict_day(con, origin, n, assets):
     wind_util, wind_src = _wind_util(con, origin, n, assets)
     solar_util, wind_util, tcog_on = _apply_tcog(con, idx, solar_util, wind_util, assets[5])
     if tcog_on:
-        solar_src += '+tcog'; wind_src += '+tcog'
+        solar_src += '+tcog'
     # 일 스케일링은 tcog 다음·야간마스크 앞이다. tcog 가 더한 뒤의 최종 이용률을 낮춰야
     # 흐린날 과대분이 실제로 빠지고, 야간은 어차피 0 이 되므로 순서상 앞에 와야 한다.
     solar_util, day_scale = _apply_solar_daily_scale(con, idx, solar_util, n)
