@@ -287,9 +287,11 @@ def netload_panel_data(date: str) -> dict | None:
     def _series(s):
         return [None if pd.isna(v) else round(float(v), 1) for v in s]
 
-    smp = C.jeju_smp_frame(day, day, mode="latest")
-    smp_min = None if smp["est_smp"].isna().all() else round(float(smp["est_smp"].min()), 1)
-    danger_hours = int(smp["smp_danger"].fillna(0).sum())
+    smp_min, danger_hours = None, 0
+    if C.show_smp():
+        smp = C.jeju_smp_frame(day, day, mode="latest")
+        smp_min = None if smp["est_smp"].isna().all() else round(float(smp["est_smp"].min()), 1)
+        danger_hours = int(smp["smp_danger"].fillna(0).sum())
     dem = df["est_demand_jeju"]
     return {
         "nl_spark": _series(nl_est),
@@ -779,9 +781,17 @@ def _netload_panel_html(nl: dict | None) -> str:
                f'<span class="gv">{f(nl["demand_peak"])}<small>MW 최대</small></span></div>'
                + _sparkline_svg(nl["demand_spark"], color=C.COLOR["demand"],
                                 overlay=nl.get("demand_real_spark")))
-    smp_min = nl.get("smp_min")
-    danger = nl.get("danger_hours", 0)
-    danger_cls = ' class="gv warn"' if danger else ' class="gv"'
+    smp_rows = ""
+    if C.show_smp():
+        smp_min = nl.get("smp_min")
+        danger = nl.get("danger_hours", 0)
+        danger_cls = ' class="gv warn"' if danger else ' class="gv"'
+        smp_rows = (
+            '<div class="divider"></div>'
+            f'<div class="nlrow"><span class="gk"><i style="background:{C.COLOR["smp"]}"></i>SMP 최저(예측)</span>'
+            f'<span class="gv">{"—" if smp_min is None else f"{smp_min:,.1f}"}<small>원/kWh</small></span></div>'
+            '<div class="nlrow"><span class="gk">음수가격 경보</span>'
+            f'<span{danger_cls}>{danger}<small>시간</small></span></div>')
     return (
         '<div class="panel panel--netload">'
         '<div class="panel__head">'
@@ -791,11 +801,7 @@ def _netload_panel_html(nl: dict | None) -> str:
         f'<div class="nlrow"><span class="gk"><i style="background:{C.COLOR["net_load"]}"></i>'
         f'순 부하 최소</span><span class="gv">{f(nl["nl_min"])}<small>MW</small></span></div>'
         f'{nl_chart}'
-        '<div class="divider"></div>'
-        f'<div class="nlrow"><span class="gk"><i style="background:{C.COLOR["smp"]}"></i>SMP 최저(예측)</span>'
-        f'<span class="gv">{"—" if smp_min is None else f"{smp_min:,.1f}"}<small>원/kWh</small></span></div>'
-        '<div class="nlrow"><span class="gk">음수가격 경보</span>'
-        f'<span{danger_cls}>{danger}<small>시간</small></span></div>'
+        f'{smp_rows}'
         f'{dem}'
         '</div></div>')
 

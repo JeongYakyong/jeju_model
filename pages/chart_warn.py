@@ -20,6 +20,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from pages import common as C
+
 NET_COL = "est_net_load_jeju"     # 경고 판정 대상 컬럼 (원본 est_net_demand)
 SMP_MIN_THRESHOLD = 10            # SMP < 이 값(원/kWh)이면 최저발전(Min) 경고에 합산
 
@@ -289,10 +291,14 @@ def render_warning_threshold_inputs():
             value=w_max, step=10,
         )
 
+    if C.show_smp():
+        min_rule = (f"최저발전 조건: 순 부하 < 임계값 **또는** SMP < {SMP_MIN_THRESHOLD}원 "
+                    f"**또는** 음수가격 경보  \n\n")
+    else:
+        min_rule = "최저발전 조건: 순 부하 < 임계값  \n\n"
     st.caption(
         f"경고 우선순위: 최저 > 최대 > 심야 > 저/고발전  \n\n"
-        f"최저발전 조건: 순 부하 < 임계값 **또는** SMP < {SMP_MIN_THRESHOLD}원 "
-        f"**또는** 음수가격 경보  \n\n"
+        f"{min_rule}"
         f"심야 조건: 00-06시 중 순 부하 < 임계값"
     )
 

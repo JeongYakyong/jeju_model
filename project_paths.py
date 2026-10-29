@@ -24,6 +24,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 # ── 폴더 ─────────────────────────────────────────────────────────────────
 DIR_COLLECTORS  = os.path.join(ROOT, 'collectors')    # 수집기 (KMA/KPX API → DB)
 DIR_FORECASTING = os.path.join(ROOT, 'forecasting')   # 수요·신재생·SMP 서빙
+DIR_PAGES       = os.path.join(ROOT, 'pages')         # Streamlit 화면 + 브리핑
 DIR_MODELS      = os.path.join(ROOT, 'models')        # 학습된 모델 바이너리
 DIR_DATA        = os.path.join(ROOT, 'data')          # 운영 DB 보관 폴더(DB 는 git 제외)
 
@@ -55,7 +56,9 @@ COLLECT_JMA        = os.path.join(DIR_COLLECTORS, 'collect_jma.py')           # 
 SERVE_CHAIN        = os.path.join(DIR_FORECASTING, 'serve_chain.py')           # 수요+신재생 → est_horizon_jeju
 SERVE_SMP          = os.path.join(DIR_FORECASTING, 'serve_smp.py')             # SMP → est_smp_horizon_jeju
 FIT_SOLAR_SCALE    = os.path.join(DIR_FORECASTING, 'fit_solar_scale.py')       # 태양광 일 스케일링 보정표 적합·점검
+GEN_BRIEFS         = os.path.join(DIR_PAGES, 'gen_briefs.py')                  # AI 브리핑 일괄 생성·점검 → ai_briefings.db
 
 # ── 인증·환경 ────────────────────────────────────────────────────────────
 ENV_FILE   = os.path.join(ROOT, '.env')          # API 키 (수집기 dotenv 는 상위 폴더 탐색으로 이 파일을 찾는다)
 SITE_LOCK  = os.path.join(ROOT, 'site_lock.json')  # 사이트 접속 잠금 설정 (pages/site_lock.py, git 제외)
+UI_SETTINGS = os.path.join(ROOT, 'ui_settings.json')  # 화면 표시 설정 — SMP 켜기/끄기 (관리자 메뉴, git 제외)

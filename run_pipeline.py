@@ -17,7 +17,7 @@
 사용
 ----
     python run_pipeline.py                     # 12z 풀 (①→④, cron 00:30 KST)
-    python run_pipeline.py --steps light18     # 18z 당일예보 라이트 (①→②′→②′-2→③′, cron ~08:00 KST)
+    python run_pipeline.py --steps light18     # 18z 당일예보 라이트 (①→②′→②′-2→③′→⑤브리핑, cron ~08:00 KST)
     python run_pipeline.py --steps repair      # 결손 복구 + JMA 12 UTC 도착 시 정식 갱신 (cron 매시 :30)
     python run_pipeline.py --steps jma_bridge  # JMA 06 UTC 가교 실행 수집 (cron 23:00 KST)
     python run_pipeline.py --steps collect     # 수집만 (①②)
@@ -99,6 +99,9 @@ PIPELINE_STEPS = [
     # JMA 06 UTC 실행 (39h, D+1 을 덮음) — 12 UTC 가 늦는 동안 D+1 임시 예측용 가교. cron 23:00 KST.
     ("jma_bridge", "JMA 06 UTC 가교 실행 수집 (D+1 임시 예측용 → forecast_jma)", P.COLLECT_JMA,
      ["--bridge"]),
+    # AI 브리핑 (2026-10-29) — 오늘·내일을 최신 예측으로 다시 만든다(덮어쓰기). light18(08:00) 끝에
+    # 둬서 18z 당일예보가 반영된 뒤 생성한다. Gemini 하루 2회. 실패 응답은 저장하지 않는다.
+    ("brief", "⑤ AI 브리핑 생성 (오늘·내일 → ai_briefings.db)", P.GEN_BRIEFS, ["--days", "2"]),
 ]
 STEP_GROUPS = {
     # all = 12z 풀 파이프라인 (명시 고정 — 18z 단계는 light18 그룹 전용)
@@ -107,7 +110,7 @@ STEP_GROUPS = {
     "predict": ["chain", "smp"],
     # 18z 라이트: historical 선행 필수 — 수요 서빙의 과거창 168h(전일 23시까지 실측)와
     # 태양광 서빙의 전일 이용률 실측이 있어야 당일예보(hd=0)가 나온다.
-    "light18": ["historical", "forecast18", "weather18", "chain18"],
+    "light18": ["historical", "forecast18", "weather18", "chain18", "brief"],
     # 매시 :30 cron (00:30 정규 실행 제외) — 결손 복구 + JMA 12 UTC 가 오면 정식 갱신.
     # 00:30 은 KMA 12z 발표(21:00 KST) 파일 준비(경험상 3~5시간)를 못 기다려 D+2~5 가 자주 빠진다.
     # 예전엔 05:00 하루 한 번(backfill5)만 다시 시도해 화면 반영이 늦었다 → 2026-10-06 매시로 변경.
@@ -158,7 +161,8 @@ def main():
                         help="실행 단계 — all(12z 풀) / collect / predict / light18(18z 당일예보) "
                              "/ repair(결손 복구·정식 갱신) / 단계키 나열 "
                              "(historical,forecast,weather,jma,chain,smp,forecast18,weather18,chain18,"
-                             "forecast_backfill,weather_backfill,jma_backfill,chain_backfill,smp_backfill,jma_bridge)")
+                             "forecast_backfill,weather_backfill,jma_backfill,chain_backfill,smp_backfill,jma_bridge,"
+                             "brief)")
     parsed = parser.parse_args()
     selected = _resolve_steps(parsed.steps)
 

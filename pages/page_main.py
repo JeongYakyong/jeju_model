@@ -23,10 +23,10 @@ import project_paths as P   # 저장소 안의 모든 경로는 여기 한곳에
 from pages import common as C
 from pages import chart_warn
 
-C.page_header(
-    "JEJU · NETLOAD", "제주 순부하 예측 대시보드", "",
-    [("수요", C.COLOR["demand"]), ("신재생", C.COLOR["renew"]),
-     ("순 부하", C.COLOR["net_load"]), ("SMP", C.COLOR["smp"])])
+_legend = [("수요", C.COLOR["demand"]), ("신재생", C.COLOR["renew"]), ("순 부하", C.COLOR["net_load"])]
+if C.show_smp():
+    _legend.append(("SMP", C.COLOR["smp"]))
+C.page_header("JEJU · NETLOAD", "제주 순부하 예측 대시보드", "", _legend)
 menu = st.sidebar.radio("메뉴", ["종합", "예측 확인", "예측 검증", "데이터 현황", "관리자"])
 TODAY = pd.Timestamp.now().normalize()
 
@@ -75,7 +75,6 @@ def render_home():
     brief_jeju.render_briefing_expander(day)
 
     df = C.jeju_range_compare(day, day + pd.Timedelta(days=1), mode="latest")
-    smp = C.jeju_smp_frame(day, day + pd.Timedelta(days=1), mode="latest")
     if df["est_net_load_jeju"].isna().all():
         lo, hi = C.jeju_date_range()
         st.warning(f"선택한 날짜의 예측이 아직 없습니다. 예측 보유 범위: **{lo} ~ {hi}**.")
@@ -83,17 +82,19 @@ def render_home():
 
     inject_metric_style()
     nl, ts_col = df["est_net_load_jeju"], df["timestamp"]
-    danger_hours = int(smp["smp_danger"].fillna(0).sum())
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("최대 순 부하(예측·48h)", "—" if nl.isna().all() else f"{nl.max():,.0f} MW",
-              _when(ts_col, nl, "max"), delta_color="off")
-    m2.metric("최저 순 부하(예측·48h)", "—" if nl.isna().all() else f"{nl.min():,.0f} MW",
-              _when(ts_col, nl, "min"), delta_color="off")
-    m3.metric("최저 SMP(예측·48h)",
-              "—" if smp["est_smp"].isna().all() else f"{smp['est_smp'].min():,.1f} 원/kWh",
-              _when(smp["timestamp"], smp["est_smp"], "min"), delta_color="off")
-    m4.metric("SMP 음수가격 경보", f"{danger_hours} 시간",
-              "48시간 창 기준", delta_color="off")
+    cols = st.columns(4 if C.show_smp() else 2)
+    cols[0].metric("최대 순 부하(예측·48h)", "—" if nl.isna().all() else f"{nl.max():,.0f} MW",
+                   _when(ts_col, nl, "max"), delta_color="off")
+    cols[1].metric("최저 순 부하(예측·48h)", "—" if nl.isna().all() else f"{nl.min():,.0f} MW",
+                   _when(ts_col, nl, "min"), delta_color="off")
+    if C.show_smp():
+        smp = C.jeju_smp_frame(day, day + pd.Timedelta(days=1), mode="latest")
+        danger_hours = int(smp["smp_danger"].fillna(0).sum())
+        cols[2].metric("최저 SMP(예측·48h)",
+                       "—" if smp["est_smp"].isna().all() else f"{smp['est_smp'].min():,.1f} 원/kWh",
+                       _when(smp["timestamp"], smp["est_smp"], "min"), delta_color="off")
+        cols[3].metric("SMP 음수가격 경보", f"{danger_hours} 시간",
+                       "48시간 창 기준", delta_color="off")
     # 캡션 제거 (사용자 결정 2026-08-26) — 문구가 어렵고, 발표 시각은 위 지도 패널 부제가
     # '8/25 21시 발표 (어제)'로 이미 답한다.  되살릴 일이 있을까 봐 남겨 둔다.
     # day_bases = df.loc[df["timestamp"].dt.normalize() == day.normalize(), "base"].dropna()
@@ -180,16 +181,19 @@ def render_smp(smp: pd.DataFrame, day: pd.Timestamp):
 
 
 def render_hourly_table(df: pd.DataFrame):
-    """시간별 예측 표 — 순 부하·수요·신재생·SMP. 순 부하 셀은 경고 임계값으로 색칠(저=빨강, 고=파랑)."""
-    t = df[["timestamp", "est_net_load_jeju", "est_demand_jeju", "est_renew_gen_jeju",
-            "est_smp", "smp_danger"]].copy()
+    """시간별 예측 표 — 순 부하·수요·신재생(+SMP). 순 부하 셀은 경고 임계값으로 색칠(저=빨강, 고=파랑)."""
+    cols = ["timestamp", "est_net_load_jeju", "est_demand_jeju", "est_renew_gen_jeju"]
+    if C.show_smp():
+        cols += ["est_smp", "smp_danger"]
+    t = df[cols].copy()
     t = t.rename(columns={
         "timestamp": "시각", "est_net_load_jeju": "순 부하(MW)", "est_demand_jeju": "수요(MW)",
         "est_renew_gen_jeju": "신재생(MW)", "est_smp": "SMP(원/kWh)", "smp_danger": "음수경보"})
     t["시각"] = t["시각"].dt.strftime("%m-%d %H시")
     for col in ["순 부하(MW)", "수요(MW)", "신재생(MW)"]:
         t[col] = t[col].round(0)
-    t["SMP(원/kWh)"] = t["SMP(원/kWh)"].round(1)
+    if C.show_smp():
+        t["SMP(원/kWh)"] = t["SMP(원/kWh)"].round(1)
     styled = t.style.apply(
         lambda r: chart_warn.style_net_load_warnings(r, net_col="순 부하(MW)"), axis=1
     ).format({"순 부하(MW)": "{:,.0f}", "수요(MW)": "{:,.0f}",
@@ -220,9 +224,11 @@ def render_forecast_view():
         lo, hi = C.jeju_date_range()
         st.warning(f"선택한 날짜의 예측이 아직 없습니다. 예측 보유 범위: **{lo} ~ {hi}**.")
         return
-    # SMP 예측을 표시 구간에 병합 — 차트 음영(Min 밴드 SMP 조건)과 시간별 표가 함께 쓴다
-    smp_range = C.jeju_smp_frame(day, end, mode="latest")
-    df = df.merge(smp_range[["timestamp", "est_smp", "smp_danger"]], on="timestamp", how="left")
+    # SMP 예측을 표시 구간에 병합 — 차트 음영(Min 밴드 SMP 조건)과 시간별 표가 함께 쓴다.
+    # SMP 표시가 꺼져 있으면(C.show_smp()) 병합하지 않으므로 음영도 순 부하만으로 판정된다.
+    if C.show_smp():
+        smp_range = C.jeju_smp_frame(day, end, mode="latest")
+        df = df.merge(smp_range[["timestamp", "est_smp", "smp_danger"]], on="timestamp", how="left")
     # 차트 ① — 수요·신재생·순 부하 (선택일부터 k일) + 위험구간 음영
     render_mw(df, chosen, show_da, day, k)
 
@@ -248,13 +254,14 @@ def render_forecast_view():
               _when(ts_col, wu, "max"), delta_color="off")
 
     # 차트 ② — SMP 검증(펼쳐 보기). 익일 지평=발표값 그대로라 검증 의미 없음 → 모델 산출(모레 지평)로 검증.
-    smp_v = C.jeju_smp_frame(day, day, mode="fixed", value=2)
-    with st.expander("SMP 검증 — 이틀 전 밤 발표 예측 vs 하루전 SMP(KPX) (선택일 24시간)"):
-        render_smp(smp_v, day)
-        st.caption("SMP 모델의 실제 산출은 **이틀 전 밤 발표 예측(빨강)** 이며, "
-                   "**하루 전 KPX가 발표한 SMP(회색)** 와 비교합니다. ▽ = 음수가격 경보.")
+    if C.show_smp():
+        smp_v = C.jeju_smp_frame(day, day, mode="fixed", value=2)
+        with st.expander("SMP 검증 — 이틀 전 밤 발표 예측 vs 하루전 SMP(KPX) (선택일 24시간)"):
+            render_smp(smp_v, day)
+            st.caption("SMP 모델의 실제 산출은 **이틀 전 밤 발표 예측(빨강)** 이며, "
+                       "**하루 전 KPX가 발표한 SMP(회색)** 와 비교합니다. ▽ = 음수가격 경보.")
 
-    # 시간별 표 — 표시 구간 전체 (est_smp·smp_danger 는 위에서 병합됨)
+    # 시간별 표 — 표시 구간 전체 (SMP 표시가 켜져 있으면 est_smp·smp_danger 가 위에서 병합됨)
     with st.expander("시간별 예측 표"):
         render_hourly_table(df)
 
@@ -454,6 +461,8 @@ def render_data_status():
 
     st.subheader("데이터 현황 (제주)")
     heat = C.jeju_coverage_daily()
+    if not C.show_smp():
+        heat = heat.loc[[lab for lab in heat.index if "SMP" not in lab]]
     cols, labels = list(heat.columns), list(heat.index)
     is_lh = {lab: lh for lab, _, _, lh in C.JEJU_COVERAGE_ITEMS}   # 장지평(예보)=초록 / 그 외=파랑
     cov = heat.values                                              # 실제 수집률(0~1)
@@ -479,14 +488,21 @@ def render_data_status():
     st.plotly_chart(fig, width="stretch")
     st.caption("🟩 초록 = 예보(미래까지 채워짐) · 🟦 파랑 = 실측(오늘까지 채워짐) · "
                "진할수록 그날 수집률이 높음 · 빨간 점선 = 오늘.")
+    if C.show_smp():
+        blue_note = ("**파랑(실측 계열)** — 실측값과 하루전 SMP는 오늘까지만 채워집니다. "
+                     "SMP 예측은 익일·모레까지만 발행됩니다.\n\n")
+    else:
+        blue_note = "**파랑(실측 계열)** — 실측값은 오늘까지만 채워집니다.\n\n"
     C.help_expander(
         "**초록(예보 계열)** — 수요·순 부하·태양광·풍력 예측과 기상 예보는 3일후 이후 미래까지 "
         "미리 채워집니다.\n\n"
-        "**파랑(실측 계열)** — 실측값과 하루전 SMP는 오늘까지만 채워집니다. "
-        "SMP 예측은 익일·모레까지만 발행됩니다.\n\n"
+        + blue_note +
         "데이터는 서버 crontab 이 매일 정해진 시각에 자동 수집합니다(관리자 메뉴에서 수동 실행도 가능).")
     with st.expander("항목별 최신 현황 요약"):
-        st.dataframe(C.coverage_table("jeju"), width="stretch", hide_index=True)
+        summary = C.coverage_table("jeju")
+        if not C.show_smp():
+            summary = summary[~summary["항목"].str.contains("SMP")]
+        st.dataframe(summary, width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -499,7 +515,7 @@ def render_admin():
     from run_pipeline import PIPELINE_STEPS
 
     st.markdown("#### ▶ 오늘 예측 — 원클릭 전체 실행")
-    st.caption("①실측 수집 → ②예보 수집 → ③예측 체인 → ④SMP 순서로 실행합니다. "
+    st.caption("①실측 수집 → ②예보 수집 → ③예측 체인 → ④SMP → ⑤AI 브리핑 순서로 실행합니다. "
                "서버에서는 crontab 이 같은 파이프라인(run_pipeline.py)을 매일 자동 실행합니다.")
     if st.button("▶ 오늘 예측 실행 (전체)", key="adm_oneclick", type="primary"):
         failed_labels = []
@@ -595,6 +611,18 @@ def render_admin():
         from pages import site_lock
         site_lock.render_admin_section()
 
+    # SMP 표시 켜기/끄기 — 화면·AI 브리핑에만 적용. SMP 예측 생성(파이프라인 ④)은 계속 돈다.
+    with st.expander("화면 표시 설정 — SMP"):
+        current = C.show_smp()
+        on = st.toggle("SMP 표시 (화면 · AI 브리핑)", value=current, key="adm_show_smp")
+        st.caption("끄면 종합·예측 확인·데이터 현황·지도 패널·AI 브리핑에서 SMP 가 빠집니다. "
+                   "모든 접속자에게 적용됩니다(ui_settings.json). "
+                   "이미 저장된 브리핑은 그대로이니, 바꾼 뒤 필요하면 브리핑을 다시 생성하세요.")
+        if on != current:
+            C.set_show_smp(on)
+            st.cache_data.clear()
+            st.rerun()
+
     # 브리핑 수동 생성 — 종합 메뉴와 같은 로직(Gemini → ai_briefings.db)
     with st.expander("AI 브리핑 수동 생성"):
         from pages import brief_jeju
@@ -607,10 +635,13 @@ def render_admin():
                     fact_df,
                     st.session_state.get("warn_low", 250),
                     st.session_state.get("warn_high", 750))
+            if brief_jeju.is_valid_brief(text):
                 from pages import brief_store
                 brief_store.save(day_ts.strftime("%Y-%m-%d"), days=1, kind="daily",
                                  brief_text=text, fact_text=facts, model=brief_jeju.GEMINI_MODEL)
-            st.success("저장 완료 — 종합 메뉴 브리핑에 반영됩니다.")
+                st.success("저장 완료 — 종합 메뉴 브리핑에 반영됩니다.")
+            else:
+                st.error("브리핑 생성 실패 — 저장하지 않았습니다.")
             st.markdown(text)
 
 

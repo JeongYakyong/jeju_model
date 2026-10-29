@@ -57,11 +57,16 @@ def _weather_hourly(date: str) -> pd.DataFrame:
 
 
 def build_fact_frame(day: pd.Timestamp) -> pd.DataFrame:
-    """선택일 24h 팩트 프레임 — 예측(순 부하·이용률)+SMP+3구역 평균 기상, DatetimeIndex."""
+    """선택일 24h 팩트 프레임 — 예측(순 부하·이용률)+SMP+3구역 평균 기상, DatetimeIndex.
+
+    SMP 표시가 꺼져 있으면(C.show_smp(), 관리자 메뉴) SMP 를 붙이지 않는다 — 팩트·리스크·프롬프트가 전부 컬럼 유무로
+    갈리므로 브리핑에서 SMP 가 통째로 빠진다.
+    """
     df = C.jeju_range_compare(day, day, use_live=False, mode="latest")
-    smp = C.jeju_smp_frame(day, day, mode="latest")
-    df = df.merge(smp[["timestamp", "est_smp", "smp_neg_proba", "smp_danger"]],
-                  on="timestamp", how="left")
+    if C.show_smp():
+        smp = C.jeju_smp_frame(day, day, mode="latest")
+        df = df.merge(smp[["timestamp", "est_smp", "smp_neg_proba", "smp_danger"]],
+                      on="timestamp", how="left")
     wx = _weather_hourly(day.strftime("%Y-%m-%d"))
     if not wx.empty:
         df = df.merge(wx, on="timestamp", how="left")
@@ -112,14 +117,15 @@ def _detect_risks(df: pd.DataFrame, warn_low: int, warn_high: int) -> list[str]:
         if st.session_state.get('warn_min_enabled', _WARN_DEFAULTS['warn_min_enabled']):
             warn_min = st.session_state.get('warn_min', _WARN_DEFAULTS['warn_min'])
             cond = df[net] < warn_min
+            rule = f"임계 {warn_min}MW"
             if 'est_smp' in df.columns:
                 cond = cond | (df['est_smp'] < SMP_MIN_THRESHOLD)
+                rule += f" 또는 SMP<{SMP_MIN_THRESHOLD}원"
             mn = df[cond]
             if not mn.empty:
                 events.append(
                     f"최저발전 경고: {mn.index.hour.min():02d}~{mn.index.hour.max():02d}시, "
-                    f"최저 순부하 {mn[net].min():.0f}MW ({len(mn)}시간, "
-                    f"임계 {warn_min}MW 또는 SMP<{SMP_MIN_THRESHOLD}원)"
+                    f"최저 순부하 {mn[net].min():.0f}MW ({len(mn)}시간, {rule})"
                 )
 
         if st.session_state.get('warn_overnight_enabled', _WARN_DEFAULTS['warn_overnight_enabled']):
@@ -166,13 +172,14 @@ def generate_energy_narrative(df: pd.DataFrame, warn_low: int, warn_high: int) -
             if not daytime.empty and 'est_solar_util_jeju' in daytime.columns else 0
         avg_wind_util = df['est_wind_util_jeju'].mean() if 'est_wind_util_jeju' in df.columns else 0
 
-        # ── 순 부하 & SMP ──
+        # ── 순 부하 & SMP (SMP 는 컬럼이 있을 때만 — C.show_smp()) ──
         min_net = df[net].min() if net in df.columns else 0
         max_net = df[net].max() if net in df.columns else 0
-        if 'est_smp' in df.columns and not df['est_smp'].dropna().empty:
-            smp_str = f"{df['est_smp'].min():.1f}"
-        else:
-            smp_str = "데이터 없음"
+        has_smp = 'est_smp' in df.columns
+        smp_line = ""
+        if has_smp:
+            smp_str = f"{df['est_smp'].min():.1f}원" if df['est_smp'].notna().any() else "데이터 없음"
+            smp_line = f"- SMP: 최저 {smp_str}\n"
 
         # ── 시간대별 흐름 ──
         cloud_flow = _time_block_summary(df, 'total_cloud')
@@ -188,16 +195,16 @@ def generate_energy_narrative(df: pd.DataFrame, warn_low: int, warn_high: int) -
 
     warn_min = st.session_state.get('warn_min', _WARN_DEFAULTS['warn_min'])
     warn_overnight = st.session_state.get('warn_overnight', _WARN_DEFAULTS['warn_overnight'])
+    min_rule = f"{warn_min}MW (또는 SMP<{SMP_MIN_THRESHOLD}원)" if has_smp else f"{warn_min}MW"
     fact_block = f"""[데이터]
 - 기상(3구역 평균): 전운량 {avg_cloud:.1f}, 일사 {avg_solar:.2f}, 풍속 {avg_wind:.1f}m/s, 강수 {avg_rain:.2f}mm
 - 시간대별 전운량: {cloud_flow}
 - 시간대별 강수: {rain_flow}
 - 시간대별 풍속: {wind_flow}
-- SMP: 최저 {smp_str}원
-- 이용률: 태양광 {avg_solar_util:.2%}, 풍력 {avg_wind_util:.2%}
+{smp_line}- 이용률: 태양광 {avg_solar_util:.2%}, 풍력 {avg_wind_util:.2%}
 - 순부하: 최저 {min_net:.1f}MW, 최대 {max_net:.1f}MW
 - 시간대별 순부하: {net_flow}
-- 임계치: 저부하 {warn_low}MW, 고부하 {warn_high}MW, 최저발전 {warn_min}MW (또는 SMP<{SMP_MIN_THRESHOLD}원), 심야(00-06) {warn_overnight}MW
+- 임계치: 저부하 {warn_low}MW, 고부하 {warn_high}MW, 최저발전 {min_rule}, 심야(00-06) {warn_overnight}MW
 - 임계 교차 여부: 최저 순부하 {min_net:.1f}MW {"<" if min_net < warn_low else "≥"} 저부하 {warn_low}MW / 최대 순부하 {max_net:.1f}MW {">" if max_net > warn_high else "≤"} 고부하 {warn_high}MW
 
 [감지된 리스크]
@@ -211,6 +218,15 @@ def generate_energy_narrative(df: pd.DataFrame, warn_low: int, warn_high: int) -
         "당신은 제주 LNG터미널 운영 핵심 요약 전문가입니다. "
         "장황한 설명 없이 데이터 기반의 운영 지침을 4~5줄 내외로 요약하여 보고하십시오."
     )
+    # SMP 가 없으면(C.show_smp() 꺼짐) 규칙에서도 SMP 를 지운다 — 규칙 문구에 SMP 가 남아 있으면
+    # LLM 이 "(-) SMP" 같은 표현을 그대로 옮겨 쓴다.
+    if has_smp:
+        min_gen_rule = "\"(-) SMP 또는 저순부하로 LNG 정지·태양광 최대 발전 예상\""
+        smp_rule = ("   - [감지된 리스크]에 'SMP 음수가격 경보' 또는 'SMP 음수확률' → "
+                    "\"SMP 음수가격 위험 시간대 LNG 발전 정지·최소 출력 검토\"\n")
+    else:
+        min_gen_rule = "\"저순부하로 LNG 정지·태양광 최대 발전 예상\""
+        smp_rule = ""
     prompt = f"""{fact_block}
 
 [작성 규칙]
@@ -222,9 +238,8 @@ def generate_energy_narrative(df: pd.DataFrame, warn_low: int, warn_high: int) -
 4. 강수가 0보다 크면 강수 시간대와 예측 정확도 저하 가능성 언급.
 5. 셋째~넷째 항목: [감지된 리스크] 중 **주간(06-18시)** 시간대에 해당하는 이벤트에만 기반해 LNG 운영 방향을 작성. 규칙:
    - [감지된 리스크]에 '저부하' → "순부하 감소로 LNG 발전 정지 가능성"
-   - [감지된 리스크]에 '최저발전 경고' → "(-) SMP 또는 저순부하로 LNG 정지·태양광 최대 발전 예상"
-   - [감지된 리스크]에 'SMP 음수가격 경보' 또는 'SMP 음수확률' → "SMP 음수가격 위험 시간대 LNG 발전 정지·최소 출력 검토"
-   - [감지된 리스크]에 '고부하' → "순부하 증가로 LNG 발전량 증가 예상"
+   - [감지된 리스크]에 '최저발전 경고' → {min_gen_rule}
+{smp_rule}   - [감지된 리스크]에 '고부하' → "순부하 증가로 LNG 발전량 증가 예상"
    - 주간에 해당하는 위 이벤트가 **하나도 없으면** → "주간(오전·오후) 순부하 정상 범위, LNG 안정 운영 전망" (이 경우 반드시 한 줄로 작성하고 다른 리스크를 만들지 말 것).
 6. 다섯번째 항목: [감지된 리스크] 중 **심야(00-06) 또는 야간(18-23)** 에 해당하는 이벤트 기반 LNG 운영 방향.
    - '심야 저부하' 감지 시 → "심야 LNG 정지/최소 출력 유지 검토 필요"
@@ -246,6 +261,17 @@ def generate_energy_narrative(df: pd.DataFrame, warn_low: int, warn_high: int) -
         return response.text, fact_block
     except Exception as e:  # noqa: BLE001
         return f"Generation failed: {e}", fact_block
+
+
+# generate_energy_narrative 가 실패할 때 돌려주는 안내 문구의 머리말
+FAIL_PREFIXES = ("Data processing error", "(Gemini API 키가 없어", "Generation failed")
+
+
+def is_valid_brief(text) -> bool:
+    """정상 브리핑인지 — 실패 안내 문구·빈 응답·'•' 항목이 없는 응답은 저장하지 않는다."""
+    if not text or text.startswith(FAIL_PREFIXES):
+        return False
+    return "•" in text
 
 
 # ==========================================
@@ -276,9 +302,11 @@ def render_briefing_expander(day: pd.Timestamp, title: str = "✨ AI 예측 브�
                 warn_low = st.session_state.get('warn_low', _WARN_DEFAULTS['warn_low'])
                 warn_high = st.session_state.get('warn_high', _WARN_DEFAULTS['warn_high'])
                 text, facts = generate_energy_narrative(df, warn_low, warn_high)
+            if is_valid_brief(text):
                 brief_store.save(date_key, days=1, kind="daily",
                                  brief_text=text, fact_text=facts, model=GEMINI_MODEL)
-            st.rerun()
+                st.rerun()
+            st.error(f"브리핑 생성 실패 — 저장하지 않았습니다(기존 브리핑 유지).\n\n{text}")
 
         if saved and saved.get("brief_text"):
             card = _brief_card_html(saved["brief_text"])

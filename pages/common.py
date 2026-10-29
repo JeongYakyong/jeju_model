@@ -7,6 +7,7 @@
 """
 from pathlib import Path
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -257,6 +258,28 @@ JEJU_HZ_MAX = 5   # 운영 지평 상한 (2026-07-17 D+7→D+5 축소; 아카이
 JEJU_EST_COLS = ["est_demand_jeju", "est_solar_gen_jeju", "est_wind_gen_jeju", "est_net_load_jeju",
                  "est_solar_util_jeju", "est_wind_util_jeju"]
 JEJU_SMP_COLS = ["est_smp", "smp_neg_proba", "smp_danger"]
+
+
+# SMP 화면 표시 여부 — 관리자 메뉴에서 켜고 끈다(ui_settings.json, git 제외).
+# 2026-10-29 사용자 결정: 당분간 SMP 미사용 → 설정 파일이 없으면 숨김.
+# 화면·AI 브리핑에만 적용되고, 예측 생성(run_pipeline 의 smp 단계)은 그대로 돈다.
+def _read_ui_settings() -> dict:
+    try:
+        return json.loads(Path(P.UI_SETTINGS).read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def show_smp() -> bool:
+    return bool(_read_ui_settings().get("show_smp", False))
+
+
+def set_show_smp(on: bool) -> None:
+    settings = _read_ui_settings()
+    settings["show_smp"] = bool(on)
+    Path(P.UI_SETTINGS).write_text(json.dumps(settings, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
+
 
 # ── 용어 SSOT (사용자 확정 2026-07-17): 화면에 D+N 표기 금지 —
 # 지평은 당일/익일/모레/N일후, 발표는 배지("새벽 발표"/"전일 밤 발표")로 말한다.
