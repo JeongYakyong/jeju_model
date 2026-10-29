@@ -16,6 +16,9 @@ python run_pipeline.py --steps repair     # 결손 복구 + JMA 12 UTC 도착 �
 python run_pipeline.py --steps jma_bridge # JMA 06 UTC 가교 실행 (cron 23:00 KST, README 'crontab 등록' 참고)
 python run_pipeline.py --steps collect    # 수집만 / predict = 예측만
 python run_pipeline.py --steps chain,smp  # 단계 키 나열도 가능
+python pages/gen_briefs.py               # AI 브리핑 오늘·내일 갱신 (light18 의 brief 단계와 동일)
+python pages/gen_briefs.py --start 2025-12-20 --end 2026-10-30 --check         # 브리핑 무결성 점검 (API 0회)
+python pages/gen_briefs.py --start 2025-12-20 --end 2026-10-30 --missing-only  # 브리핑 결손 채우기
 
 # 단계 단독 실행 — 인자 실험은 이 형태로 (파이프라인 통째로 돌리지 말 것)
 python forecasting/serve_chain.py --utc 12 --base 2026-07-16 --no-write
@@ -81,7 +84,12 @@ collectors/  ──▶  data/input_data_jeju.db  ──▶  forecasting/  ──
     12z·18z 를 따로 평가한다. (현재 `forecast_horizon` 도 223 base 전부 12z —
     18z 파이프라인이 2026-07-18 도입이라 축적분이 아직 거의 없다.)
 - `data/weather_kim.db` 는 **폐지됨**(2026-07-30). 새로 만들지 말 것.
-- `data/ai_briefings.db` = Gemini 브리핑 저장소.
+- `data/ai_briefings.db` = Gemini 브리핑 저장소. `pages/gen_briefs.py` 가 매일 08:00(light18 의
+  `brief` 단계) 오늘·내일을 다시 만든다. 실패 응답은 저장 안 함(`brief_jeju.is_valid_brief`).
+  ⚠ 서버 Gemini 키는 **Free Tier = gemini-3-flash 하루 20회**(16:00 KST 리셋) — 1500 RPD 가 아니다.
+  결손 backfill 은 서버 crontab 16:10 `--missing-only --limit 15` 가 최신 날짜부터 채운다.
+  **project2026 에 제주 브리핑을 붙일 때는 수집·생성을 따로 만들지 말고 이 DB 를 읽게 한다**
+  (사용자 결정 2026-10-29). project2026 은 자기 제주 DB·체인을 따로 돌리는 별개 시스템이다.
 
 ### 세 개의 SSOT — 여기만 고치면 전파된다
 
@@ -177,6 +185,9 @@ collectors/ 는 **10개**뿐이고 파일 = 역할 하나씩이다. 이름 규�
   CSS 토큰·plotly 템플릿·`common.COLOR` 팔레트·지도 타일을 일괄 교체한다. 차트 색을
   손대려면 `_CHART_PALETTES` 를 고치고 dataviz 검증(CVD·명도)을 다시 통과시켜야 한다.
 - 관리자 메뉴는 `OPS_PASSWORD`(.env) 게이트 — `common.ops_gate()` 를 함수 첫 줄에서 호출.
+- **SMP 는 화면에서 숨김이 기본** (2026-10-29 사용자 결정: 당분간 미사용). 관리자 메뉴 토글 →
+  `ui_settings.json`(git 제외) → `common.show_smp()`. 화면·지도 패널·데이터 현황·AI 브리핑이 이 함수를
+  본다. **예측 생성(smp 단계)은 계속 돈다.** SMP 를 보여 주는 화면을 새로 만들면 `show_smp()` 가드를 넣을 것.
 - **잠금은 목적이 다른 두 개다 — 섞지 말 것** (2026-09-07):
   - `common.ops_gate()` = 들어온 사람이 **실행 버튼**을 못 누르게. 비밀번호는 `.env` 의 `OPS_PASSWORD`.
   - `site_lock.gate()` = 사이트에 **들어오는 것 자체**를 막는다. `app.py` 최상단에서 부르고,
