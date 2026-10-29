@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-10-29 — AI 브리핑 backfill·매일 자동 갱신 + SMP 화면 숨김(관리자 토글)
+
+### 사용자 결정 사항 (재질문 금지)
+- 브리핑은 **현재 예측으로 전 기간 재생성**(구 서버 `/jeju2` JSON 52건은 이관 안 함). SMP 는 빼고 만든다.
+- SMP 는 jeju_model·project2026 모두 당분간 미사용 — **화면·브리핑에서만 숨기고 예측 생성은 유지**.
+  숨김 여부는 코드 상수가 아니라 **관리자 메뉴에서 켜고 끈다**.
+- project2026 에 제주 브리핑을 붙일 때는 **별도 수집·생성 없이 jeju_model 의 ai_briefings.db 를 읽게** 한다(지금은 손대지 않음).
+- 매일 cron 으로 브리핑 자동 갱신·저장.
+
+### 한 것 (커밋 33e6e92)
+- 서버 확인: `/jeju` = `~/jeju_model`, 브리핑 DB 에 3건뿐(버튼 생성만 있었음). 예측은 2025-12-20~ 결손 없음.
+  project2026 루트 화면은 자기 제주 DB·체인을 따로 돌리는 별개 시스템, Gemini 키도 무효라 할당량 공유 없음.
+- `pages/gen_briefs.py` — `--missing-only`(없음·실패 문구·SMP 포함 구 형식) / `--check`(API 0회) / 기본 오늘·내일 갱신.
+  최신 날짜부터, 429 재시도 후에도 계속되면 중단.
+- `run_pipeline` 에 `brief` 단계, **light18(08:00) 끝**에서 오늘·내일 갱신(crontab 변경 없음).
+- 실패 응답("Generation failed" 등)은 화면 버튼·관리자·CLI 모두 저장 안 함(`brief_jeju.is_valid_brief`).
+- SMP 표시: `common.show_smp()` ← `ui_settings.json`(git 제외, 없으면 숨김). 종합 지표·예측 확인(음영·검증·표)·
+  지도 패널·데이터 현황·브리핑 팩트/프롬프트가 이 함수를 본다. AppTest 로 켬/끔 두 상태 렌더 확인(로컬·서버).
+
+### 결과
+- ★서버 키는 **Free Tier, gemini-3-flash 하루 20회**(429 응답 quotaId `GenerateRequestsPerDayPerProjectPerModel-FreeTier`,
+  quotaValue 20, 16:00 KST 리셋). 1500 RPD 로 알고 있었으나 이 키는 아니다.
+- 첫날 10-10~10-30 21일 생성 후 할당량 소진. 남은 294일(293 없음 + 08-26 구 형식)은 사용자 결정대로
+  **서버 crontab 16:10 KST `--missing-only --limit 15`**(최신 날짜부터)로 매일 채운다 → 약 11-18 완료.
+  crontab 백업 `~/crontab_backup_20261029.txt`, 브리핑 DB 백업 `data/ai_briefings.db.bak_20261029`.
+- 10-30 08:00 light18 의 brief 는 할당량 리셋(16:00) 전이라 실패한다(저장 안 됨) — 10-31 08:00 부터 정상.
+- `sudo systemctl restart jeju_model.service` 는 자동 모드에서 거부돼 못 했다. watchdog 으로 pages/ 변경은
+  다음 rerun 에 반영되지만, `run_pipeline.py`·`project_paths.py` 등 앱이 이미 import 한 루트 모듈 변경까지
+  확실히 하려면 재시작 권장.
+
+---
+
+## 2026-10-27 — 보고서용: 수요 모델 vs KPX 하루전, 2026 월별·계절별 비교
+
+### 사용자 결정 사항 (재질문 금지)
+- 평가는 **2025년까지만 학습한 백테스트**로 (배포본은 2026-07 까지 재적합돼 있어 2026 평가에 부적합).
+- 비교 지평은 **D+1 만** (모델 D+1 은 대상일 00:30 발표, KPX 는 전날 발표 — 보고서에 각주로).
+- 기간은 서버 DB 복사본으로 2026-01-01 ~ 10-27 (10월 부분 월).
+
+### 한 것
+- `Training/2_jeju_demand_forecaster/model/_eval_2026_vs_kpx.py` — 배포본과 같은 구성·절차
+  (train ≤2025-08 / val 2025-09~12 → best_iter 136 → ≤2025-12 재적합). 평가 기상 = 전날 12z
+  `forecast_horizon` horizon_d=1(빈 시각 기후값 폴백 69h). 산출 `tab/2026_vs_kpx_{monthly,seasonal,overall,hourly}.csv`,
+  `fig/2026_vs_kpx_monthly_mape.png`.
+- 2026-04-07 19시 실측 1916MW 는 계측 오류로 보고 결측 처리(앞뒤 750~830MW).
+
+### 결과 (MAPE %, 모델 / KPX)
+- 전체 4.60 / 6.57, 일별 승률 83.5%. 겨울 5.20/6.37 · 봄 4.59/6.01 · 여름 4.47/7.15 · 가을(9~10월) 4.15/6.74.
+- 10개월 모두 모델 우위. 격차 최소 4월(0.77%p), 최대 8월(3.72%p).
+- 7월은 폭염(일평균 900MW↑)으로 둘 다 과소예측(편향 모델 −39 / KPX −59MW). KPX 는 여름·가을에 과소 편향이 큼.
+
+---
+
 ## 2026-10-08 — 과소예측 원인 진단 + JMA 원본 일사 전환 준비 (학습 대기)
 
 ### 사용자 결정 사항 (재질문 금지)

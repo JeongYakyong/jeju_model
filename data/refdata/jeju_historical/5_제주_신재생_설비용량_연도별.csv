@@ -1,0 +1,5 @@
+﻿year,solar_capacity_year_end,wind_capacity_year_end,solar_added,wind_added,is_partial_year
+2023,332.757,258.419,78.381,0.0,False
+2024,371.447,360.58,38.69,102.161,False
+2025,405.218,363.918,33.771000000000015,3.3380000000000223,False
+2026,454.968,363.918,49.75,0.0,True
