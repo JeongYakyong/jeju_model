@@ -26,7 +26,7 @@ from pages import chart_warn
 _legend = [("수요", C.COLOR["demand"]), ("신재생", C.COLOR["renew"]), ("순 부하", C.COLOR["net_load"])]
 if C.show_smp():
     _legend.append(("SMP", C.COLOR["smp"]))
-C.page_header("JEJU · NETLOAD", "제주 순부하 예측 대시보드", "", _legend)
+C.page_header("JEJU · NETLOAD", "제주통제소 순부하기반 가스송출량 예측 대시보드", "", _legend)
 menu = st.sidebar.radio("메뉴", ["종합", "예측 확인", "예측 검증", "데이터 현황", "관리자"])
 TODAY = pd.Timestamp.now().normalize()
 
@@ -335,7 +335,7 @@ def render_daily_trend():
     if not acc_h.empty and hz_lbl in acc_h.index:
         inject_metric_style()
         row = acc_h.loc[hz_lbl]
-        st.markdown(f"**{hz_lbl} 지평 정확도** ({bh_lbl}) — 검증기간 전체 기준")
+        st.markdown(f"**{hz_lbl} 예측 정확도** ({bh_lbl}) — 검증기간 전체 기준")
         cards = st.columns(4)
         CARD = [("수요", "수요", "MAPE"), ("순 부하", "순 부하", "nMAE"),
                 ("태양광", "태양광", "설비용량 nMAE"), ("풍력", "풍력", "설비용량 nMAE")]
@@ -347,7 +347,7 @@ def render_daily_trend():
     if acc.empty:
         st.caption("이 기간·발표·지평에 집계할 데이터가 없습니다.")
         return
-    st.markdown(f"**일별 추이** — {hz_lbl} 지평 ({bh_lbl})")
+    st.markdown(f"**일별 정확도 비교** — {hz_lbl} 지평 ({bh_lbl})")
     fig = C.make_fig(height=400, ytitle="오차율 (%)")
     for name in C.JEJU_ACC_MODELS:
         fig.add_scatter(x=acc.index, y=acc[name], name=name, mode="lines+markers",
@@ -355,10 +355,8 @@ def render_daily_trend():
                         connectgaps=False,
                         hovertemplate="%{x|%m-%d} · %{y:.1f}%<extra>" + name + "</extra>")
     st.plotly_chart(fig, width="stretch")
-    st.caption(f"각 날짜를 **{bh_lbl}** 의 **{hz_lbl}** 지평으로 예측한 값의 일별 오차율 · "
-               "수요=MAPE, 순 부하=평균 대비 nMAE, "
-               "태양광·풍력=설비용량 기준 nMAE · 값이 갑자기 솟은 날 = 그 날 기상이 급변(비·구름 등)해 "
-               "예측이 빗나간 날로 읽습니다.")
+    st.caption(f"각 날짜를 **{bh_lbl}** 의 **{hz_lbl}** 실측 데이터로 예측한 값의 일별 오차율 비교\n\n"
+               "오차율이 급증한 시간대는 기상변동 혹은 모델예측이 빗나간 날로 해석.")
 
 
 def render_horizon_curve():
@@ -435,14 +433,14 @@ def render_date_series():
         st.caption(f"⚠ {day:%Y-%m-%d}을 {bh_lbl} {hz_lbl} 지평으로 예측한 발표본이 없어 "
                    "실측만 표시됩니다(발표본 구멍).")
     st.caption(f"{day:%Y-%m-%d}을 **{bh_lbl}** 의 **{hz_lbl}** 지평으로 예측한 값(점선) vs 실측(실선) · "
-               "수요·신재생·태양광·풍력 동시 표시 · 실측이 아직 없는 미래일이면 점선만 보입니다.")
+               "실측이 아직 없는 미래일이면 점선만 보입니다.")
 
 
 def render_validation():
     """예측 검증 — 모델 정확도 시각화 3종. SMP는 제외(예측 확인에서 따로)."""
     st.subheader("모델 정확도 검증 (제주)")
-    st.caption("수요=MAPE · 순 부하=평균 대비 nMAE · 태양광·풍력=설비용량 기준 nMAE(MAE÷설비용량) · "
-               "값이 낮을수록 정확 · 검증기간 = 실측이 있는 대상일 기준.")
+    st.caption("평가기준 : 수요 → MAPE, 순 부하 → nMAE · 태양광 및 풍력 → 설비용량 기준 nMAE · "
+               "값이 낮을수록 정확함.")
     t1, t2, t3 = st.tabs(["① 일별 정확도 추이", "② 지평별 성능", "③ 지정일 예측 시계열"])
     with t1:
         render_daily_trend()
@@ -486,18 +484,16 @@ def render_data_status():
     if today_lbl in cols:
         fig.add_vline(x=today_lbl, line_dash="dot", line_color=C.COLOR["alert"])
     st.plotly_chart(fig, width="stretch")
-    st.caption("🟩 초록 = 예보(미래까지 채워짐) · 🟦 파랑 = 실측(오늘까지 채워짐) · "
-               "진할수록 그날 수집률이 높음 · 빨간 점선 = 오늘.")
+    st.caption("🟩 초록 = 예보데이터(미래)  🟦 파랑 = 실측데이터(과거)")
     if C.show_smp():
         blue_note = ("**파랑(실측 계열)** — 실측값과 하루전 SMP는 오늘까지만 채워집니다. "
                      "SMP 예측은 익일·모레까지만 발행됩니다.\n\n")
     else:
         blue_note = "**파랑(실측 계열)** — 실측값은 오늘까지만 채워집니다.\n\n"
     C.help_expander(
-        "**초록(예보 계열)** — 수요·순 부하·태양광·풍력 예측과 기상 예보는 3일후 이후 미래까지 "
-        "미리 채워집니다.\n\n"
-        + blue_note +
-        "데이터는 서버 crontab 이 매일 정해진 시각에 자동 수집합니다(관리자 메뉴에서 수동 실행도 가능).")
+        "**초록(예보 계열)** — 수요·순 부하·태양광·풍력 예측과 기상 예보는 5일 이후까지 "
+        "미리 채워집니다.\n\n")
+    
     with st.expander("항목별 최신 현황 요약"):
         summary = C.coverage_table("jeju")
         if not C.show_smp():
